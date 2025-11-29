@@ -1,2 +1,2 @@
 # DynBenchContainer
-Containerized DynBench translator
+Containerized DynBench benchmark records generator.

@@ -38,5 +38,5 @@ def download_and_extract_pagerank():
 
 
 if __name__ == "__main__":
-   nltk.download('punkt')
-   download_and_extract_pagerank()
+    nltk.download('punkt')
+    download_and_extract_pagerank()

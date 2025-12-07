@@ -1,0 +1,94 @@
+= DynBench -- Dynamic Question and Query Creation for Generating new Benchmarking Datasets
+
+A FastAPI application for transforming questions and SPARQL queries over Wikidata by replacing entities with semantically similar alternatives.
+
+:toc:
+:toclevels: 5
+:toc-placement!:
+:source-highlighter: highlight.js
+ifdef::env-github[]
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+:github-repository: https://github.com/WSE-research/DynBenchContainer/
+endif::[]
+
+---
+
+toc::[]
+
+---
+
+== Features
+
+* **Multi-language Support**: Handles questions in English, German, French, Russian, and Ukrainian
+* **Complexity Levels**: Generates variations at different difficulty levels (easy, normal, hard, random)
+* **LLM Integration**: Uses an LLM to rephrase questions after entity replacement
+* **PageRank Scoring**: Ranks substitutes based on entity popularity
+* **REST API**: Exposes `/transform` endpoint for batch processing
+* **Knowledge Graph**: Uses (only) the Wikidata Knowledge Graph to find semantically similar entities
+* **MongoDB Caching**: Caches SPARQL results for performance
+
+== Environment Variables
+
+Required in `.env`:
+
+* MongoDB credentials: `MONGO_HOST`, `MONGO_USER`, `MONGO_PASS`
+* LLM service credentials: `LLM_URL`, `KEY` (empty string for local instance)
+* Wikidata SPARQL endpoint: `WIKIDATA_ENDPOINT`, `WIKIDATA_AGENT`
+
+== Usage
+
+=== Requirements for Python development
+
+Requirements are defined in link:./requirements.txt[requirements.txt]. Install them with:
+[source,bash]
+----
+pip install -r requirements.txt
+----
+
+=== CLI
+
+==== Run the Python application
+
+[source,bash]
+----
+python3 dynbench.py --query "SELECT ?answer WHERE { wd:Q14452 wdt:P17 ?answer }" --question "Which country does the famous Easter island belong to?" --language en --complexity normal --model "mistral-small:latest"
+----
+
+==== Start uvicorn webservice 
+
+[source,bash]
+----
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+----
+
+=== Docker
+
+==== Build the Docker image 
+
+[source,bash]
+----
+docker build -t dynbench .
+----
+
+==== Start the Docker container 
+
+[source,bash]
+----
+docker run --add-host=host.docker.internal:host-gateway -e MONGO_URL="mongodb://host.docker.internal:27017" -p 8000:8000 dynbench
+----
+
+Thereafter, the API will be available at `http://localhost:8000`.
+
+== Contribute
+
+We are happy to receive your contributions. 
+Please create a pull request or an {github-repository}/issues/new[issue].
+As this tool is published under the {github-repository}/blob/main/LICENSE[MIT license], feel free to {github-repository}/fork[fork] it and use it in your own projects.
+
+== Disclaimer
+
+This tool is provided "as is" and without any warranty, express or implied.

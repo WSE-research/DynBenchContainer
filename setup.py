@@ -13,6 +13,12 @@ logging.basicConfig(level=logging.INFO)
 
 
 def download_and_extract_pagerank():
+    """
+    Download and extract the RageRank file from the AWS S3 bucket.
+    The file is stored in the "pagerank" folder.
+    """
+    logger.info("Downloading and extracting RageRank files...")
+    
     url = "https://danker.s3.amazonaws.com/2025-11-05.allwiki.links.rank.bz2"
     folder = "pagerank"
     
@@ -38,5 +44,8 @@ def download_and_extract_pagerank():
 
 
 if __name__ == "__main__":
+    """
+    Download the PageRank file and extract it.
+    """
     nltk.download('punkt')
     download_and_extract_pagerank()

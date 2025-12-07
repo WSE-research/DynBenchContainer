@@ -23,8 +23,8 @@ from nltk.tokenize import sent_tokenize
 
 from dynutils import execute, get_wikidata_label, sparql_results_to_list_of_dicts
 from dynutils import parse_query, extract_entities
-from dynutils import extract_q_number, check_poductivity_single
-from dynutils import levenshtein_distance
+from dynutils import extract_q_number, check_productivity_single
+from dynutils import get_levenshtein_distance
 
 
 logger = logging.getLogger(__name__)
@@ -72,6 +72,7 @@ PREDICATES = ('wdt:P31', 'wdt:P279', 'wdt:P106')
 
 
 def get_resources_types(item, cache=None, predicates=[]):
+    """Get the types of the resources in the item."""
     results = {}
 
     if not predicates:
@@ -91,7 +92,8 @@ def get_resources_types(item, cache=None, predicates=[]):
                 r[i].sort(key=extract_q_number)
         except KeyboardInterrupt:
             raise
-        except:
+        except Exception as e:
+            logger.warning(f'Skipped exception in function get_resources_types: {e}')
             continue
 
         results[entity] = r
@@ -247,12 +249,14 @@ def build_pagerank_list(substitutes):
     return result
 
 
-def count_sentences(s: str):
+def count_sentences(s: str) -> int:
+    """Count the number of sentences in the string."""
     n = sent_tokenize(s)
     return len(n)
 
 
 def get_info(query: str, cache=None):
+    """Get the information about the query."""
     info = {}
     info['triples'] = [i for i in parse_query(query) if all(i)]
     info['resources'] = extract_entities(query)
@@ -288,20 +292,40 @@ def get_info(query: str, cache=None):
     return info
 
 
+def sort_replaces_by_complexity(replaces, complexity):
+    """
+    Sort or shuffle the replaces list based on the complexity level.
+    
+    Args:
+        replaces: List of tuples (original_pagerank, new_pagerank, replace_dict)
+        complexity: One of 'easy', 'normal', 'hard', or 'random'
+    
+    Returns:
+        Sorted or shuffled list of replaces
+    
+    Raises:
+        ValueError: If complexity is not one of the valid options
+    """
+    if complexity == 'easy':
+        return sorted(replaces, key=lambda x: x[1], reverse=True)  # easy
+    elif complexity == 'normal':
+        return sorted(replaces, key=lambda x: abs(x[0]-x[1]))  # normal
+    elif complexity == 'hard':
+        return sorted(replaces, key=lambda x: x[1])  # hard
+    elif complexity == 'random':
+        shuffled = replaces.copy()
+        random.shuffle(shuffled)
+        return shuffled
+    else:
+        raise ValueError(f'Complexity can only be easy/normal/hard/random. Got: {complexity}')
+
+
 def create_question_query(query, question, model, lang, complexity, cache=None):
+    """Create a new question and query by replacing one entity."""
     info = get_info(query, cache)
 
     replaces = build_pagerank_list(info['substitutes'])
-    if complexity == 'easy':
-        replaces = sorted(replaces, key=lambda x: x[1], reverse=True) # easy
-    elif complexity == 'normal':
-        replaces = sorted(replaces, key=lambda x: abs(x[0]-x[1])) # normal
-    elif complexity == 'hard':
-        replaces = sorted(replaces, key=lambda x: x[1]) # hard
-    elif complexity == 'random':
-        random.shuffle(replaces)
-    else:
-        raise ValueError('In function create_new_question_query mode can be only easy/normal/hard/random.')
+    replaces = sort_replaces_by_complexity(replaces, complexity)
 
     for replace in replaces:
         replace = replace[2]
@@ -310,7 +334,7 @@ def create_question_query(query, question, model, lang, complexity, cache=None):
         if not old_label:
             return None, None
 
-        if not check_poductivity_single(query, replace, WIKIDATA_ENDPOINT, WIKIDATA_AGENT, cache=cache):
+        if not check_productivity_single(query, replace, WIKIDATA_ENDPOINT, WIKIDATA_AGENT, cache=cache):
             continue
 
         new_question = None
@@ -331,7 +355,7 @@ def create_question_query(query, question, model, lang, complexity, cache=None):
 
             _, restored_question = replace_entity(model, new_question, new_query, replace['new'], replace['old'], lang)
             restored_question = restored_question.strip(' ,\n\t')
-            dist =  levenshtein_distance(question, restored_question)
+            dist =  get_levenshtein_distance(question, restored_question)
             if dist > 4:
                 continue
 
@@ -384,10 +408,16 @@ def main():
     lang = args.lang
     model = args.model
 
-    with open('pagerank/2025-11-05.allwiki.links.rank', 'r') as f:
-        for line in f:
-            entity, rank = line.split('\t')
-            page_rank[entity.strip()] = int(float(rank.strip())*100)
+    logger.info('Loading PageRank files...')
+    try:
+        with open('pagerank/2025-11-05.allwiki.links.rank', 'r') as f:
+            for line in f:
+                entity, rank = line.split('\t')
+                page_rank[entity.strip()] = int(float(rank.strip())*100)
+            logger.info('PageRank file loaded successfully')
+    except Exception as e:
+        logger.error(f'Error loading PageRank file in function main of dynbench.py: {e}. Exiting...')
+        exit(1)
 
     new_question, new_query = create_question_query(query, question, model, lang, complexity, cache)
 
@@ -418,10 +448,10 @@ class TransformResponse(BaseModel):
 @app.post("/transform", response_model=TransformResponse)
 def transform_endpoint(request: TransformRequest):
     if request.lang not in LANGUAGES:
-        raise HTTPException(status_code=400, detail=f"Unsupported language: {request.lang}")
+        raise HTTPException(status_code=400, detail=f"Unsupported language: {request.lang} (supported: {', '.join(LANGUAGES.keys())})")
     
     if request.complexity not in ['easy', 'normal', 'hard', 'random']:
-        raise HTTPException(status_code=400, detail=f"Invalid complexity: {request.complexity}")
+        raise HTTPException(status_code=400, detail=f"Invalid complexity: {request.complexity} (supported: easy, normal, hard, random)")
     
     try:
         new_question, new_query = create_question_query(
@@ -441,17 +471,19 @@ def transform_endpoint(request: TransformRequest):
         )
     
     except Exception as e:
-        logger.error(f"Error in transform endpoint: {e}")
+        logger.error(f"Error in transform endpoint: {e} (request: {request})")
         raise HTTPException(status_code=500, detail=str(e))
     
 
 @app.get("/")
 def read_root():
+    """Redirect to the documentation."""
     return RedirectResponse(url='/docs')
 
 
 @app.get("/health")
 def health_check():
+    """Check the health of the API."""
     return {"status": "healthy"}
 
 

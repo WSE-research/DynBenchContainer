@@ -1,7 +1,3 @@
-= DynBench -- Dynamic Question and Query Creation for Generating new Benchmarking Datasets
-
-A FastAPI application for transforming questions and SPARQL queries over Wikidata by replacing entities with semantically similar alternatives.
-
 :toc:
 :toclevels: 5
 :toc-placement!:
@@ -14,6 +10,10 @@ ifdef::env-github[]
 :warning-caption: :warning:
 :github-repository: https://github.com/WSE-research/DynBenchContainer/
 endif::[]
+
+= DynBench -- Dynamic Question and Query Creation for Generating new Benchmarking Datasets
+
+A FastAPI application for transforming questions and SPARQL queries over Wikidata by replacing entities with semantically similar alternatives.
 
 ---
 
@@ -38,6 +38,8 @@ Required in `.env`:
 * MongoDB credentials: `MONGO_HOST`, `MONGO_USER`, `MONGO_PASS`
 * LLM service credentials: `LLM_URL`, `KEY` (empty string for local instance)
 * Wikidata SPARQL endpoint: `WIKIDATA_ENDPOINT`, `WIKIDATA_AGENT`
+
+A sample `.env` file is provided in the root directory. Copy it to `.env` and fill in the missing values.
 
 == Usage
 

@@ -48,7 +48,7 @@ def create_capped_collection(db: Database, name: str, size_mb: int):
                 "Please drop it manually or rename it."
             )
         else:
-            # Already capped — nothing to do
+            # Already capped ï¿½ nothing to do
             return
 
     # Create capped collection
@@ -62,4 +62,7 @@ def create_capped_collection(db: Database, name: str, size_mb: int):
 
 
 if __name__ == "__main__":
+    """
+    Create the capped collections for the cache and the page rank.
+    """
    create_capped_collection(db, 'cache', size_mb=CACHE_SIZE_MB)

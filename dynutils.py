@@ -27,29 +27,31 @@ def add_suffix(s: str, suffix: str):
 
 
 def json_load(name: str, encoding: str='utf-8', suffix='.json'):
+    """Load a JSON file from the filesystem."""
     with open(add_suffix(name, suffix), 'r', encoding=encoding) as f:
         return json.load(f)
 
 
 def json_save(name: str, item, encoding: str='utf-8', indent: int=2, suffix='.json'):
+    """Save an item to a JSON file on the filesystem."""
     with open(add_suffix(name, suffix), 'w', encoding=encoding) as f:
         json.dump(item, f, ensure_ascii=False, indent=indent)
 
 
-def wait_time(wait: float, timer_ID: str=None, asyncronous=True) -> bool:
+def wait_time(wait: float, timer_id: str=None, asynchronous=True) -> bool:
     """helps to wait particular time period between events"""
     global last_time
     
     now = time()
 
-    if last_time[timer_ID]:
-        while now - last_time[timer_ID] < wait:
-            if asyncronous:
+    if last_time[timer_id]:
+        while now - last_time[timer_id] < wait:
+            if asynchronous:
                 return False
             else:
                 sleep(0.1)
     else:
-        last_time[timer_ID] = now
+        last_time[timer_id] = now
 
     return True
 
@@ -57,30 +59,36 @@ def wait_time(wait: float, timer_ID: str=None, asyncronous=True) -> bool:
 last_time = ddict(float)
 
 
-def timer_reset(timer_ID: str):
-    last_time[timer_ID] = None
+def timer_reset(timer_id: str):
+    last_time[timer_id] = None
 
 
 class BiDict(MutableMapping):
     def __init__(self, *args, **kwargs):
+        """Initialize the BiDict."""
         self.store = dict()
         self.update(dict(*args, **kwargs))
 
     def __getitem__(self, key):
+        """Get the value for the given key."""
         return self.store[key]
 
     def __setitem__(self, key, value):
+        """Set the value for the given key."""
         self.store[key] = value
         self.store[value] = key
 
     def __delitem__(self, key):
+        """Delete the value for the given key."""
         del self.store[self.store[key]]
         del self.store[key]
 
     def __iter__(self):
+        """Iterate over the keys in the BiDict."""
         return iter(self.store)
     
     def __len__(self):
+        """Get the length of the BiDict."""
         return len(self.store) // 2
 
 
@@ -147,7 +155,7 @@ def execute(query: str, endpoint_url: str, agent: str, delay=2.0, cache=None):
             return r['result']
 
     if delay:
-        wait_time(delay, 'wikidata', asyncronous=False)
+        wait_time(delay, 'wikidata', asynchronous=False)
 
     headers = {
         'User-Agent': agent
@@ -193,17 +201,20 @@ def uri2short(resource: str, prefixes=WIKIDATA_PREFIX):
     
 
 def find_prefixes(query):
+    """Find the prefixes in the SPARQL query."""
     prefix_pattern = r'PREFIX\s+\w+:\s+<[^>]+>'
     return re.findall(prefix_pattern, query)
 
 
 def find_uris(sparql_query):
+    """Find the URIs in the SPARQL query."""
     uri_pattern = r'\<*http://[^\s>]+\>*'
     uris = re.findall(uri_pattern, sparql_query)
     return uris
 
 
 def replace_standard_prefixes(sparql, prefixes=None):
+    """Replace the standard prefixes in the SPARQL query."""
     body = sparql.split('WHERE')[-1]
     uris = find_uris(body)
 
@@ -215,6 +226,7 @@ def replace_standard_prefixes(sparql, prefixes=None):
 
 
 def remove_standard_prefixes(sparql):
+    """Remove the standard prefixes from the SPARQL query."""
     head = sparql.split('WHERE')[0]
     prefixes = find_prefixes(head)
 
@@ -225,6 +237,7 @@ def remove_standard_prefixes(sparql):
 
 
 def normal_sparql(query: str, prefixes=None) -> str:
+    """Normalize the SPARQL query."""
     query = remove_standard_prefixes(query)
     if prefixes:
         query = replace_standard_prefixes(query, prefixes)
@@ -345,7 +358,7 @@ def parse_query(query):
     return triples
 
 
-def levenshtein_distance(a, b):
+def get_levenshtein_distance(a, b) -> int:
     """Compute the Levenshtein distance between two strings."""
     n, m = len(a), len(b)
     if n > m:
@@ -365,6 +378,7 @@ def levenshtein_distance(a, b):
 
 
 def extract_entities_recursive(parsed):
+    """Extract the entities from the parsed SPARQL query."""
     results = []
 
     if isinstance(parsed, URIRef):
@@ -385,10 +399,12 @@ def extract_entities_recursive(parsed):
 
 
 def extract_entities(sparql):
+    """Extract the entities from the SPARQL query."""
     return extract_entities_recursive(parseQuery(sparql))
 
 
 def sparql_results_to_list_of_dicts(result):
+    """Convert the SPARQL results to a list of dictionaries."""
     if not result:
         return[]
     
@@ -406,6 +422,7 @@ def sparql_results_to_list_of_dicts(result):
 
 
 def query_wikidata_label(uri: str, endpoint_url, agent, lang: str='en', cache=None) -> str:
+    """Query the Wikidata label for a given URI."""
     if uri in FIXED_LABELS:
         return FIXED_LABELS[uri]
 
@@ -445,19 +462,23 @@ def get_wikidata_label(uri: str, endpoint_url, agent, lang: str='en', cache=None
     return query_wikidata_label(f'{prefix}:{index}', endpoint_url, agent, lang, cache)
 
 
-def check_poductivity_single(query, replace, endpoint_url, agent, cache=None):
+def check_productivity_single(query, replace, endpoint_url, agent, cache=None):
+    """Check if the query is productive after replacing the old entity with the new one."""
     sparql = query.replace(replace['old'], replace['new']).strip()
     try:
         result = sparql_results_to_list_of_dicts(execute(sparql, endpoint_url, agent, cache=cache))
         return bool(result)
-    except:
+    except Exception as e:
+        logger.error(f'Exception in function "check_productivity_single": {e}')
         return False
     
 
 def extract_q_number(entity):
+    """Extract the Q number from the entity."""
     if entity.startswith('wd:Q'):
         try:
             return int(entity.split(':Q')[-1])
         except ValueError:
+            logger.error(f'Exception in function "extract_q_number": ValueError: {entity}')
             return float('inf')
     return float('inf')

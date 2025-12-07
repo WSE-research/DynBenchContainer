@@ -37,9 +37,13 @@ Required in `.env`:
 
 * MongoDB credentials: `MONGO_HOST`, `MONGO_USER`, `MONGO_PASS`
 * LLM service credentials: `LLM_URL`, `KEY` (empty string for local instance)
-* Wikidata SPARQL endpoint: `WIKIDATA_ENDPOINT`, `WIKIDATA_AGENT`
+* Wikidata SPARQL endpoint: `WIKIDATA_ENDPOINT`, `WIKIDATA_AGENT` (agent string is empty for the basic endpoint)
 
 A sample `.env` file is provided in the root directory. Copy it to `.env` and fill in the missing values.
+
+== Setup
+
+DynBench uses PageRank of Wikidata's URIs, provided on the https://danker.s3.amazonaws.com/index.html page and NLTK. To download required resources you need to run setup.py before usage. Be aware what PageRank file is 726 MB in size.
 
 == Usage
 

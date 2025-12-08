@@ -3,6 +3,7 @@
 
 DEBUG = False
 
+import sys
 import requests
 import random
 import argparse
@@ -13,13 +14,11 @@ from pydantic import BaseModel
 from fastapi.responses import RedirectResponse
 
 from pymongo import MongoClient
-# from pymongo.database import Database, Collection
 
 import logging
+from uvicorn.config import LOGGING_CONFIG
 
 from decouple import Config, RepositoryEnv
-
-import nltk
 
 from nltk.tokenize import sent_tokenize
 
@@ -29,7 +28,8 @@ from dynutils import extract_q_number, check_productivity_single
 from dynutils import get_levenshtein_distance
 
 
-logger = logging.getLogger(__name__)
+logging.config.dictConfig(LOGGING_CONFIG)
+logger = logging.getLogger('uvicorn.error')
 logging.basicConfig(level=logging.INFO)
 
 
@@ -46,6 +46,12 @@ WIKIDATA_ENDPOINT = config('WIKIDATA_ENDPOINT')
 
 KEY = config('KEY')
 
+logger.debug(f'Mongo host: {MONGO_HOST}')
+logger.debug(f'Mongo user: {MONGO_USER}')
+logger.debug(f'Wikidata endpoint: {WIKIDATA_ENDPOINT}')
+logger.debug(f'Wikidata agent: {WIKIDATA_AGENT}')
+logger.debug(f'LLM URL: {LLM_URL}')
+
 mongo = MongoClient(
     MONGO_HOST,
     username=MONGO_USER,
@@ -57,15 +63,17 @@ cache = db['cache']
 
 page_rank = {}
 
-logger.info('Loading PageRank files...')
+logger.info('Loading PageRank file...')
 try:
     with open('pagerank/2025-11-05.allwiki.links.rank', 'r') as f:
-        for line in f:
+        for x, line in enumerate(f):
             entity, rank = line.split('\t')
             page_rank[entity.strip()] = int(float(rank.strip())*100)
-        logger.info('PageRank file loaded successfully')
+            if x % 11069 == 0:
+                print(f'Loaded {x+1:,} records.'.replace(',', ' '), file=sys.stderr, end='\r')
+    logger.info('PageRank file loaded successfully')
 except Exception as e:
-    logger.error(f'Error loading PageRank file in function main of dynbench.py: {e}. Exiting...')
+    logger.error(f'Error loading PageRank file in dynbench.py: {e}. Exiting...')
     exit(1)
 
 LANGUAGES = {
@@ -110,11 +118,11 @@ def get_resources_types(info: dict, cache=None, predicates: list=[]) -> dict:
             for i in predicates:
                 r[i].sort(key=extract_q_number)
 
-            logger.info(f'Collected properties for entity {entity}.')
+            logger.debug(f'Collected properties for entity {entity}.')
         except KeyboardInterrupt:
             raise
-        except:
-            continue
+        except Exception as e:
+            logger.error(f'Exception {e} in function get_resources_types for entity {entity}.')
 
         results[entity] = r
         
@@ -130,6 +138,9 @@ def get_conditions_by_predicates(info: dict, predicates: list=[]) -> dict:
         predicates (list): List of predicates to filter types.
     """
     conditions = ddict(dict)
+
+    logger.debug(f'Creating conditions for resources  {info["resources"]}.')
+    logger.debug(f"Resource properties: {info['types']}."    )
     
     for entity in info['resources']:
         if not entity.startswith('wd:'):
@@ -297,8 +308,6 @@ def replace_entity(model: str, question: str, query: str, entity: str, new_entit
     if not old_label or not new_label:
         return None, None
     
-    logger.info(f'Replacing {old_label} -> {new_label}.')
-
     new_query = query.replace(entity, new_entity)
 
     prompt = (
@@ -309,8 +318,10 @@ def replace_entity(model: str, question: str, query: str, entity: str, new_entit
         f'Languare of the question is {LANGUAGES[lang]}.',
     )
     prompt = '\n'.join(prompt)
-    
+
+    logger.debug('Calling LLM to replace entity in question...')
     new_question = call_LLM(LLM_URL, KEY, model, prompt, 0.0)
+    logger.debug('LLM call completed.')
 
     if not new_question:
         logger.error(f'Replace {old_label} -> {new_label} failed.')
@@ -371,11 +382,24 @@ def get_info(query: str, cache=None) -> dict:
     """
     info = {}
     info['triples'] = [i for i in parse_query(query) if all(i)]
+    num_triples = len(info['triples'])
+    logger.debug(f'Parsed {num_triples} triple{"s" if num_triples != 1 else ""} from the query.')
+
     info['resources'] = extract_entities(query)
+    num_resources = len(info['resources'])
+    logger.debug(f'Extracted {num_resources} resource{"s" if num_resources != 1 else ""} from the query.')
+
     info['types'] = get_resources_types(info, cache, PREDICATES)
+    logger.debug(f'Extracted entity properties.')
+
     info['conditions'] = get_conditions_by_predicates(info, PREDICATES)
+    logger.debug(f'Extracted conditions.')
+
     info['query conditions'] = get_query_conditions(info)
+    logger.debug(f'Extracted query conditions.')
+
     info['substitutes'] = find_substitutes(query, info, cache=cache)
+    logger.debug(f'Extracted substitutes for entities.')
 
     all_replaces = []
     for sub in info['substitutes']:
@@ -447,6 +471,8 @@ def create_question_query(query: str, question: str, model: str, lang: str, comp
     Raises:
         Exception: If an error occurs during processing.
     """
+    logger.info(f'Transforming question: "{question}"...')
+
     info = get_info(query, cache)
 
     replaces = build_pagerank_list(info['substitutes'])
@@ -458,6 +484,9 @@ def create_question_query(query: str, question: str, model: str, lang: str, comp
         old_label = get_wikidata_label(replace['old'], WIKIDATA_ENDPOINT, WIKIDATA_AGENT, lang=lang, cache=cache)
         if not old_label:
             return None, None
+        new_label = get_wikidata_label(replace['new'], WIKIDATA_ENDPOINT, WIKIDATA_AGENT, lang=lang, cache=cache)
+        if not new_label:
+            continue
 
         if not check_productivity_single(query, replace, WIKIDATA_ENDPOINT, WIKIDATA_AGENT, cache=cache):
             continue
@@ -466,6 +495,7 @@ def create_question_query(query: str, question: str, model: str, lang: str, comp
         new_query = None
 
         try:
+            logger.info(f'Replace {old_label} -> {new_label}.')
             new_query, new_question = replace_entity(model, question, query, replace['old'], replace['new'], lang)
             if not new_question or not new_query:
                 continue
@@ -479,6 +509,7 @@ def create_question_query(query: str, question: str, model: str, lang: str, comp
                 logger.info(f'Sentence count check failed (changed from {old_len} to {new_len}). Skipping replacement.')
                 continue
 
+            logger.info(f'Back-transform {new_label} -> {old_label}.')
             _, restored_question = replace_entity(model, new_question, new_query, replace['new'], replace['old'], lang)
             restored_question = restored_question.strip(' ,\n\t')
             dist =  get_levenshtein_distance(question, restored_question)
@@ -486,16 +517,15 @@ def create_question_query(query: str, question: str, model: str, lang: str, comp
                 logger.info(f'Back-transform failed (Levenshtein distance: {dist}). Skipping replacement.')
                 continue
 
-            new_label = get_wikidata_label(replace['new'], WIKIDATA_ENDPOINT, WIKIDATA_AGENT, lang=lang, cache=cache)
             logger.info(f'Successfully created new question and query by replacing {old_label} -> {new_label}.')
-            logger.info(f'Original entity: {replace["old"]} ({old_label}),  PageRank: {old_pagerank}.')
-            logger.info(f'New entity: {replace["new"]} ({new_label}), PageRank: {new_pagerank}.')
+            logger.info(f'Original entity: {replace["old"]} ({old_label}),  PageRank: {old_pagerank/100}.')
+            logger.info(f'New entity: {replace["new"]} ({new_label}), PageRank: {new_pagerank/100}.')
 
-            return new_question, new_query
+            return new_question, new_query, old_pagerank / 100, new_pagerank / 100
         except KeyboardInterrupt:
             raise
         except Exception as e:
-            logger.error(f'Exception in create_new_question_query: {e}.')
+            logger.error(f'Exception in create_question_query: {e}.')
             continue
         
     return None, None
@@ -529,12 +559,14 @@ def main():
     lang = args.lang
     model = args.model
 
-    new_question, new_query = create_question_query(query, question, model, lang, complexity, cache)
+    new_question, new_query, old_pagerank, new_pagerank = create_question_query(query, question, model, lang, complexity, cache)
 
     logger.info(f'Original Question: {question}')
     logger.info(f'Original Query: {query}')
     logger.info(f'Transformed Question: {new_question}')
     logger.info(f'Transformed Query: {new_query}')
+    logger.info(f'Old PageRank: {old_pagerank}')
+    logger.info(f'New PageRank: {new_pagerank}')
 
 
 app = FastAPI()
@@ -553,6 +585,8 @@ class TransformResponse(BaseModel):
     original_query: str
     transformed_question: str | None
     transformed_query: str | None
+    old_pagerank: float | None
+    new_pagerank: float | None
 
 
 @app.post("/transform", response_model=TransformResponse)
@@ -568,7 +602,7 @@ def transform_endpoint(request: TransformRequest) -> TransformResponse:
         raise HTTPException(status_code=400, detail=f"Invalid complexity: {request.complexity} (supported: easy, normal, hard, random)")
     
     try:
-        new_question, new_query = create_question_query(
+        new_question, new_query, old_pagerank, new_pagerank = create_question_query(
             request.query,
             request.question,
             request.model,
@@ -581,7 +615,9 @@ def transform_endpoint(request: TransformRequest) -> TransformResponse:
             original_question=request.question,
             original_query=request.query,
             transformed_question=new_question,
-            transformed_query=new_query
+            transformed_query=new_query,
+            old_pagerank=old_pagerank,
+            new_pagerank=new_pagerank
         )
     
     except Exception as e:

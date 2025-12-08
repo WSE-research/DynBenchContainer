@@ -68,7 +68,7 @@ python3 dynbench.py --query "SELECT ?answer WHERE { wd:Q14452 wdt:P17 ?answer }"
 
 [source,bash]
 ----
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+uvicorn dynbench:app --reload --host 0.0.0.0 --port 8000
 ----
 
 === Docker

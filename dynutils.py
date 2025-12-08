@@ -1,16 +1,16 @@
 import re
-import json
+# import json
 from time import time, sleep
 
-# from glob import glob
-# from hashlib import sha1
+from typing import MutableMapping, Any, Hashable
 
 from collections import defaultdict as ddict
 from collections.abc import MutableMapping
 
 from rdflib.plugins.sparql.parser import parseQuery
 from rdflib.term import Variable
-from rdflib import Graph, URIRef, Literal, BNode
+# from rdflib import Graph, URIRef, Literal, BNode
+from rdflib import URIRef
 from pyparsing import ParseResults
 
 import requests
@@ -21,49 +21,86 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
-def add_suffix(s: str, suffix: str):
-    """Adds suffix to the string s if s is not ending with it, else returns s"""
-    return s if len(suffix) == 0 or s.endswith(suffix) else s + suffix
+_last_time = ddict(float)
 
 
-def json_load(name: str, encoding: str='utf-8', suffix='.json'):
-    """Load a JSON file from the filesystem."""
-    with open(add_suffix(name, suffix), 'r', encoding=encoding) as f:
-        return json.load(f)
+def wait_time(wait: float, timer_ID: Hashable=None, asynchronous: bool=True) -> bool:
+    """
+    Wait for a specified time period between events.
+    Used for rate limiting and throttling, e.g., for public API calls or resource-intensive operations.
+    This function is NOT thread-safe. Do not use in multi-threaded environments.
+    
+    Args:
+        wait: Minimum time interval (in seconds) to wait
+        timer_ID: Identifier for the timer. If None, uses default timer
+        asynchronous: If False, blocks execution until time condition is met, 
+             result immediately otherwise.
 
+    Returns:
+        bool: If True, enough time has passed since last call 
+            with the same timer_ID (or on the first call), False otherwise.
 
-def json_save(name: str, item, encoding: str='utf-8', indent: int=2, suffix='.json'):
-    """Save an item to a JSON file on the filesystem."""
-    with open(add_suffix(name, suffix), 'w', encoding=encoding) as f:
-        json.dump(item, f, ensure_ascii=False, indent=indent)
-
-
-def wait_time(wait: float, timer_id: str=None, asynchronous=True) -> bool:
-    """helps to wait particular time period between events"""
-    global last_time
+    Raises:
+        TypeError: If wait parameter is not a number
+        ValueError: If wait parameter is negative
+        TypeError: If timer_ID is not a hashable type
+    """
+    global _last_time
+    
+    if not isinstance(wait, (int, float)):
+        raise TypeError('wait parameter must be a number')
+    if wait < 0:
+        raise ValueError('wait parameter cannot be negative')
+    if not isinstance(timer_ID, Hashable):
+        raise TypeError('timer_ID must be a hashable type')
     
     now = time()
 
-    if last_time[timer_id]:
-        while now - last_time[timer_id] < wait:
+    # Check if this timer has been used before
+    if _last_time[timer_ID]:
+        # If time condition is not met
+        if now - _last_time[timer_ID] < wait:
             if asynchronous:
                 return False
             else:
-                sleep(0.1)
+                # Block until enough time has passed
+                sleep(max(0, wait - (now - _last_time[timer_ID]))) 
+        # If we reach here, enough time has passed
+        _last_time[timer_ID] = now  # Update the last time
+        return True
     else:
-        last_time[timer_id] = now
-
-    return True
-
-
-last_time = ddict(float)
+        # First time this timer is used, record the current time
+        _last_time[timer_ID] = now
+        return True
 
 
-def timer_reset(timer_id: str):
-    last_time[timer_id] = None
+def timer_reset(timer_ID: Hashable=None) -> bool:
+    """
+    Reset a specific timer by removing its recorded time.
+    This function is NOT thread-safe. Do not use in multi-threaded environments.
+    
+    Args:
+        timer_ID: Identifier of the timer to reset
+    Returns:
+        bool: True, if the timer was successfully reset
+    Raises:
+        TypeError: If timer_ID is not a hashable type
+    """
+    global _last_time
+    
+    if not isinstance(timer_ID, Hashable):
+        raise TypeError('timer_ID must be a hashable type')
+    
+    # Reset the timer by deleting it (which will be treated as "never used")
+    return bool(_last_time.pop(timer_ID, True))
 
 
 class BiDict(MutableMapping):
+    """
+    A bidirectional dictionary that stores key: value and value: key pairs.
+    Cannot add duplicate values or key:value where key == value.
+    """
+
     def __init__(self, *args, **kwargs):
         """Initialize the BiDict."""
         self.store = dict()
@@ -75,6 +112,10 @@ class BiDict(MutableMapping):
 
     def __setitem__(self, key, value):
         """Set the value for the given key."""
+        if key == value:
+            raise ValueError('Key and value must be different')
+        if value in self.store:
+            raise ValueError('Value already exists as a key')
         self.store[key] = value
         self.store[value] = key
 
@@ -139,15 +180,20 @@ FIXED_LABELS = {
 }
 
 
-def execute(query: str, endpoint_url: str, agent: str, delay=2.0, cache=None):
+def execute(query: str, endpoint_url: str, agent: str, delay=2.0, timeout=30.0, cache=None) -> dict | None:
     """
-    Check cache first, then send query direct to wikidata.
-    query: SPARQL query
-    endpoint_url: endpoint of wikidata query service
-    agent: User-Agent string for the request
-    delay: guaranteed delay between requests in seconds
-    cache: optional MongoDB collection for caching results
-    return: json response
+    Check cache first, then send query direct to endpoint.
+
+    Args:
+        query: SPARQL query
+        endpoint_url: endpoint of SPARQL query service
+        agent: User-Agent string for the request
+        delay: guaranteed delay between requests in seconds
+        cache: optional MongoDB-like collection for caching results. Must support `find_one` and `insert_one` methods.
+    Returns:
+        json response from the SPARQL endpoint, or None if an error occurred
+    Raises:
+        KeyboardInterrupt: If the operation is interrupted by the user
     """
     if cache is not None:
         r = cache.find_one({ 'query': query, })
@@ -157,12 +203,13 @@ def execute(query: str, endpoint_url: str, agent: str, delay=2.0, cache=None):
     if delay:
         wait_time(delay, 'wikidata', asynchronous=False)
 
-    headers = {
-        'User-Agent': agent
-    }
-            
     try:
-        r = requests.get(endpoint_url, headers=headers, params = { 'format': 'json', 'query': query })
+        r = requests.get(
+            endpoint_url, 
+            headers={ 'User-Agent': agent }, 
+            params = { 'format': 'json', 'query': query },
+            timeout=timeout
+        )
 
         if r.status_code == 200:
             r = r.json()
@@ -170,6 +217,12 @@ def execute(query: str, endpoint_url: str, agent: str, delay=2.0, cache=None):
                 cache.insert_one({ 'query': query, 'result': r })
             return r
 
+    except requests.exceptions.Timeout:
+        logger.error(f'Timeout error while executing query: {query}')
+    except requests.exceptions.ConnectionError:
+        logger.error(f'Connection error while executing query: {query}')
+    except requests.exceptions.RequestException as e:
+        logger.error(f'Request exception in function "execute": {e}')
     except KeyboardInterrupt:
         raise
     except Exception as e:
@@ -178,14 +231,25 @@ def execute(query: str, endpoint_url: str, agent: str, delay=2.0, cache=None):
     return None
 
 
-def uri2short(resource: str, prefixes=WIKIDATA_PREFIX):
-    """convert entity or predicate URI into short form, e.g. 'wd:Q5'"""
+def uri2short(resource: str, prefixes: dict=WIKIDATA_PREFIX) -> str:
+    """
+    Convert entity or predicate URI into short form, e.g. 'wd:Q5'
+
+    Args:
+        resource: Full or short URI of the resource. Does nothing if resource is not in full URI form.
+        prefixes: dictionary of prefixes to use for conversion. Only prefixes present in this dictionary will be used.
+    Returns:
+        Short form of the URI, or the original resource if it was not in full URI form.
+    """
+    if not isinstance(resource, str):
+        raise TypeError('Resource must be a string')
+    
     if '/' in resource:
         resource = resource.strip()
         # delete angle brackets if they are present
         resource = resource[int(resource.startswith('<')):-int(resource.endswith('>')) or None]
-        entity = resource.split('/')[-1]
-        path = '/'.join(resource.strip().split('/')[:-1])
+        entity = resource.split('/')[-1].split('#')[-1]
+        path = resource[:-(len(entity))]
         # ensure that path ends with '/' or '#'
         path = path if (path[-1] in {'/', '#'}) else path + '/'
 
@@ -198,70 +262,91 @@ def uri2short(resource: str, prefixes=WIKIDATA_PREFIX):
     else:
         # if resource is not a full URI, return it as is
         return resource
+
+
+def replace_standard_prefixes(query: str, prefixes: dict=None) -> str:
+    """
+    Replace all full URIs in the query with their corresponding short forms using the provided prefixes.
     
+    Args:
+        query: SPARQL query
+        prefixes: Dictionary of prefixes to use for conversion
 
-def find_prefixes(query):
-    """Find the prefixes in the SPARQL query."""
+    Returns:
+        Query with full URIs replaced by their short forms
+    """
+    if prefixes is None:
+        return query.strip()
+    
+    def replace_uri(match):
+        return uri2short(match.group(0), prefixes)
+    
+    # Find all URIs in the query (both with and without angle brackets)
+    uri_pattern = r'<?(http://[^\s>]+)>?'
+    result = re.sub(uri_pattern, replace_uri, query)
+    
+    return result.strip()
+
+
+def remove_standard_prefixes_definition(query: str, prefixes: dict=None) -> str:
+    """
+    Remove PREFIX definitions for standard prefixes from the query's preamble.
+    
+    Args:
+        query: SPARQL query
+        prefixes: Dictionary of prefixes to remove from the query
+    Returns:
+        Query with standard prefix definitions removed from preample
+    :rtype: str
+    """
+    if prefixes is None:
+        return query.strip()
+    
+    def replace_prefix(match):
+        # Extract the URL from the PREFIX definition
+        url = match.group(0).split(':', 1)[-1].strip(' <>')
+        if url in prefixes:
+            return ''
+        else:
+            return match.group(0)
+    
     prefix_pattern = r'PREFIX\s+\w+:\s+<[^>]+>'
-    return re.findall(prefix_pattern, query)
+    return re.sub(prefix_pattern, replace_prefix, query).strip()
 
 
-def find_uris(sparql_query):
-    """Find the URIs in the SPARQL query."""
-    uri_pattern = r'\<*http://[^\s>]+\>*'
-    uris = re.findall(uri_pattern, sparql_query)
-    return uris
-
-
-def replace_standard_prefixes(sparql, prefixes=None):
-    """Replace the standard prefixes in the SPARQL query."""
-    body = sparql.split('WHERE')[-1]
-    uris = find_uris(body)
-
-    for uri in uris:
-        short = uri2short(uri, prefixes)
-        sparql = sparql.replace(uri, short)
-
-    return sparql.strip()
-
-
-def remove_standard_prefixes(sparql):
-    """Remove the standard prefixes from the SPARQL query."""
-    head = sparql.split('WHERE')[0]
-    prefixes = find_prefixes(head)
-
-    for prefix in prefixes:
-        sparql = sparql.replace(prefix, '')
-
-    return sparql.strip()
-
-
-def normal_sparql(query: str, prefixes=None) -> str:
-    """Normalize the SPARQL query."""
-    query = remove_standard_prefixes(query)
-    if prefixes:
-        query = replace_standard_prefixes(query, prefixes)
+def normal_sparql(query: str, prefixes: dict=None) -> str:
+    """
+    Normalize a SPARQL query by removing standard prefix definitions and replacing full URIs with their short forms.
+    
+    Args:
+        query: SPARQL query.
+        prefixes: Dictionary of prefixes to use for conversion.
+    Returns:
+        Normalized SPARQL query.
+    """
+    query = remove_standard_prefixes_definition(query, prefixes)
+    query = replace_standard_prefixes(query, prefixes)
 
     REPLACES = (
         (r'\t', r' '),
         (r'\n', r' '),
         (r'  +', r' '),
     )
-
     for i in REPLACES:
         query = re.sub(*i, query)
 
     return query
 
 
-def resolve_item(query_entry, mod=None):
+def resolve_item(query_entry, mod=None)->str:
     """
     Resolve the parsed query entry to a string representation.
+
     Args:
         query_entry: The parsed query entry to resolve.
         mod: Optional modifier to append to the resolved item.
-    Returns:
-        str: The resolved item as a string.
+    Returns: 
+        String representation of the resolved query entry.
     """
     if isinstance(query_entry, Variable):
         return f'?{query_entry}'        
@@ -280,13 +365,14 @@ def resolve_item(query_entry, mod=None):
         return resolve_item(query_entry[0])
     
 
-def parse_query(query):
+def parse_query(query: str)-> list[list[str]]:
     """
     Parse a SPARQL query and extract triples from it.
+
     Args:
-        query (str): The SPARQL query to parse.
+        query: The SPARQL query to parse.
     Returns:
-        List[List[str]]: A list of triples, where each triple is a list of three strings.
+        List of triples, where each triple is a list of three strings.
     """
     parsed = parseQuery(query)
     select_query = parsed[1]
@@ -306,59 +392,7 @@ def parse_query(query):
     return triples
 
 
-def resolve_item(query_entry, mod=None):
-    """
-    Resolve the parsed query entry to a string representation.
-    Args:
-        query_entry: The parsed query entry to resolve.
-        mod: Optional modifier to append to the resolved item.
-    Returns:
-        str: The resolved item as a string.
-    """
-    if isinstance(query_entry, Variable):
-        return f'?{query_entry}'        
-    
-    if isinstance(query_entry, dict):
-        if 'part' in query_entry:
-            if 'mod' in query_entry:
-                mod = query_entry['mod']
-            return resolve_item(query_entry['part'], mod)
-        elif 'prefix' in query_entry and 'localname' in query_entry:
-            if mod:
-                return query_entry['prefix'] + ':' + query_entry['localname'] + mod
-            else:
-                return query_entry['prefix'] + ':' + query_entry['localname']
-    elif isinstance(query_entry, list):
-        return resolve_item(query_entry[0])
-    
-
-def parse_query(query):
-    """
-    Parse a SPARQL query and extract triples from it.
-    Args:
-        query (str): The SPARQL query to parse.
-    Returns:
-        List[List[str]]: A list of triples, where each triple is a list of three strings.
-    """
-    parsed = parseQuery(query)
-    select_query = parsed[1]
-    where = select_query['where']           
-    group_parts = where['part']             
-
-    triples = []
-    for part in group_parts:
-        if part.name == 'TriplesBlock':
-            for triple in part['triples']:
-                triples.append([
-                        resolve_item(triple[0]), 
-                        resolve_item(triple[1]), 
-                        resolve_item(triple[2])
-                    ])
-
-    return triples
-
-
-def get_levenshtein_distance(a, b) -> int:
+def get_levenshtein_distance(a: str, b: str) -> int:
     """Compute the Levenshtein distance between two strings."""
     n, m = len(a), len(b)
     if n > m:
@@ -377,8 +411,15 @@ def get_levenshtein_distance(a, b) -> int:
     return current[n]
 
 
-def extract_entities_recursive(parsed):
-    """Extract the entities from the parsed SPARQL query."""
+def extract_entities_recursive(parsed: Any) -> list[str]:
+    """
+    Recursively extract entity URIs from parsed SPARQL query.
+    
+    Args:
+        parsed: Parsed SPARQL query object.
+    Returns: 
+        List of extracted entity URIs as strings.
+    """
     results = []
 
     if isinstance(parsed, URIRef):
@@ -398,40 +439,67 @@ def extract_entities_recursive(parsed):
     return results
 
 
-def extract_entities(sparql):
-    """Extract the entities from the SPARQL query."""
-    return extract_entities_recursive(parseQuery(sparql))
+def extract_entities(query: str) -> list[str]:
+    """
+    Extract all entities from the SPARQL query.
+
+    Args:
+        query: SPARQL query string
+    Returns: 
+        List of extracted entity URIs as strings
+    """
+    return extract_entities_recursive(parseQuery(query))
 
 
-def sparql_results_to_list_of_dicts(result):
-    """Convert the SPARQL results to a list of dictionaries."""
+def sparql_results_to_list_of_dicts(result: dict) -> list[dict]:
+    """
+    Convert SPARQL JSON results to a list of dictionaries.
+
+    Args:
+        result: SPARQL JSON results
+    Returns: 
+        List of dictionaries representing the results
+    """
     if not result:
-        return[]
+        return []
     
     while 'results' in result:
         result = result['results']
 
     if 'boolean' in result:
-        return [{'boolean': result['boolean']}]
+        return [{ 'boolean': result['boolean'] }]
     
     result = result.get('bindings', [])
 
-    result = [{k: v['value'] if v['type'] == 'literal' else uri2short(v['value'], WIKIDATA_PREFIX) for k, v in i.items()} for i in result]
+    return [{k: v['value'] if v['type'] == 'literal' else uri2short(v['value'], WIKIDATA_PREFIX) for k, v in i.items()} for i in result]
+
+
+def query_wikidata_label(uri: str, endpoint_url, agent: str='', lang: str='en', cache=None) -> str:
+    """
+    Query the Wikidata label for a given URI.
     
-    return result
-
-
-def query_wikidata_label(uri: str, endpoint_url, agent, lang: str='en', cache=None) -> str:
-    """Query the Wikidata label for a given URI."""
+    :param uri: Wikidata resource URI
+    :type uri: str
+    :param endpoint_url: SPARQL endpoint URL
+    :type endpoint_url: str
+    :param agent: User-Agent string for the request
+    :type agent: str
+    :param lang: Language code for the label (default is 'en')
+    :type lang: str
+    :param cache: mongoDB-like collection for caching results. Must support `find_one` and `insert_one` methods.
+    :type cache: object, optional
+    :return: Label for the URI in the specified language, or None if not found
+    :rtype: str
+    """
     if uri in FIXED_LABELS:
         return FIXED_LABELS[uri]
 
     query = (
         'SELECT ?label WHERE {',
-            f"OPTIONAL {{ {uri} rdfs:label ?lang_label. FILTER ( lang(?lang_label) = '{lang}' ) }}",
-            f"OPTIONAL {{ {uri} rdfs:label ?default_label. FILTER ( lang(?default_label) = 'mul' ) }}",
-            f"OPTIONAL {{ {uri} owl:sameAs+ ?redirect . ?redirect rdfs:label ?label . FILTER ( lang(?lang_label) = '{lang}' ) }}",
-            "BIND(COALESCE(?lang_label, ?default_label) AS ?label) . ",
+            f"OPTIONAL {{ {uri} rdfs:label ?lang_label. FILTER(LANG(?lang_label) = '{lang}') }}",
+            f"OPTIONAL {{ {uri} rdfs:label ?default_label. FILTER(LANG(?default_label) = 'mul') }}",
+            f"OPTIONAL {{ {uri} owl:sameAs+ ?redirect . ?redirect rdfs:label ?redirect_label . FILTER(LANG(?redirect_label) = '{lang}') }}",
+            "BIND(COALESCE(?lang_label, ?default_label, ?redirect_label) AS ?label) . ",
         '}',
     )
 
@@ -448,22 +516,48 @@ def query_wikidata_label(uri: str, endpoint_url, agent, lang: str='en', cache=No
     return data
 
 
-def get_wikidata_label(uri: str, endpoint_url, agent, lang: str='en', cache=None) -> str:
+def get_wikidata_label(uri: str, endpoint_url: str, agent: str='', lang: str='en', cache=None, prefixes=WIKIDATA_PREFIX) -> str:
     """ Get label for a given Wikidata URI.
-    uri: Wikidata URI
+    uri: Wikidata resource URI
+    endpoint_url: SPARQL endpoint URL
+    :type endpoint_url: str
+    agent: User-Agent string for the request
+    :type agent: str
     lang: language code for the label (default is 'en')
+    :type lang: str
     cache: optional cache object to store and retrieve labels
         cache must have methods `find_one` and `insert_one`
     return: label for the URI in the specified language, or None if not found
     """
-    prefix = 'wd' # it works despite property or entity
-    index = uri.split(':')[-1]
+    try:
+        uri = uri2short(uri, prefixes)
+        prefix = 'wd' # it works despite property or entity
+        index = uri.split(':')[-1]
+        return query_wikidata_label(f'{prefix}:{index}', endpoint_url, agent, lang, cache)
+    except Exception as e:
+        logger.error(f'Exception in function "get_wikidata_label". URI: {uri}, lang: {lang}, error: {e}')
+        return None
 
-    return query_wikidata_label(f'{prefix}:{index}', endpoint_url, agent, lang, cache)
 
 
-def check_productivity_single(query, replace, endpoint_url, agent, cache=None):
-    """Check if the query is productive after replacing the old entity with the new one."""
+def check_productivity_single(query: str, replace: dict, endpoint_url: str, agent: str='', cache=None)->bool:
+    """
+    Check if query is productive (i.e., returns non-empty results).
+    
+    :param query: SPARQL query
+    :type query: str
+    :param replace: must contain 'old' and 'new' keys for string replacement in the query
+    :type replace: dict
+    :param endpoint_url: SPARQL endpoint URL
+    :type endpoint_url: str
+    :param agent: User-Agent string for the request (default is empty string)
+    :type agent: str, optional
+    :param cache: Optional cache object to store and retrieve query results
+        cache must have methods `find_one` and `insert_one`
+    :type cache: object, optional
+    :return: True if the query returns non-empty results, False otherwise
+    :rtype: bool
+    """
     sparql = query.replace(replace['old'], replace['new']).strip()
     try:
         result = sparql_results_to_list_of_dicts(execute(sparql, endpoint_url, agent, cache=cache))
@@ -473,8 +567,15 @@ def check_productivity_single(query, replace, endpoint_url, agent, cache=None):
         return False
     
 
-def extract_q_number(entity):
-    """Extract the Q number from the entity."""
+def extract_q_number(entity: str) -> int:
+    """
+    Extract the number from the entity URI (e.g., 'wd:Q123' -> 123).
+    
+    :param entity: Entity URI string
+    :type entity: str
+    :return: Extracted number from the entity URI
+    :rtype: int
+    """
     if entity.startswith('wd:Q'):
         try:
             return int(entity.split(':Q')[-1])

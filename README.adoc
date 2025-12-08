@@ -61,7 +61,12 @@ pip install -r requirements.txt
 
 [source,bash]
 ----
-python3 dynbench.py --query "SELECT ?answer WHERE { wd:Q14452 wdt:P17 ?answer }" --question "Which country does the famous Easter island belong to?" --language en --complexity normal --model "mistral-small:latest"
+python3 dynbench.py \
+  --query "SELECT ?answer WHERE { wd:Q14452 wdt:P17 ?answer }" \
+  --question "Which country does the famous Easter island belong to?" \
+  --language en \
+  --complexity normal \
+  --model "mistral-small:latest"
 ----
 
 ==== Start uvicorn webservice 

@@ -84,7 +84,12 @@ docker build -t dynbench .
 
 [source,bash]
 ----
-docker run --add-host=host.docker.internal:host-gateway -e MONGO_URL="mongodb://host.docker.internal:27017" -p 8000:8000 dynbench
+docker run \
+  --add-host=host.docker.internal:host-gateway \
+  -e MONGO_HOST="mongodb://host.docker.internal:27017" \
+  -e LLM_URL="http://host.docker.internal:11434/api/generate" \
+  -p 8000:8000 \
+  dynbench
 ----
 
 Thereafter, the API will be available at `http://localhost:8000`.

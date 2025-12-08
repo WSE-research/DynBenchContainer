@@ -1,4 +1,5 @@
 import os
+import sys
 import bz2
 import shutil
 
@@ -10,6 +11,11 @@ import nltk
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
+
+
+def show_progress(block_num, block_size, total_size):
+    """Show progress of download"""
+    print(f'{round(block_num * block_size / total_size * 100, 2)}%', end="\r")
 
 
 def download_and_extract_pagerank():
@@ -28,7 +34,8 @@ def download_and_extract_pagerank():
     # Download file
     bz2_file = os.path.join(folder, "2025-11-05.allwiki.links.rank.bz2")
     logger.info(f"Downloading {url}...")
-    urllib.request.urlretrieve(url, bz2_file)
+    urllib.request.urlretrieve(url, bz2_file, show_progress)
+    print(' '*20, file=sys.stderr, end='\r')  # Clear progress line
     
     # Extract bz2 file
     output_file = os.path.join(folder, "2025-11-05.allwiki.links.rank")

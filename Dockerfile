@@ -5,7 +5,12 @@ FROM python:3.12-alpine
 WORKDIR /app
 
 # Install system dependencies needed for pip packages
-RUN apk add --no-cache gcc musl-dev
+RUN apk add --no-cache curl bzip2
+
+RUN mkdir -p /app/pagerank
+
+RUN curl -fSL "https://danker.s3.amazonaws.com/2025-11-05.allwiki.links.rank.bz2" -o "/app/pagerank/2025-11-05.allwiki.links.rank.bz2"
+RUN bzip2 -df /app/pagerank/2025-11-05.allwiki.links.rank.bz2 > /app/pagerank/2025-11-05.allwiki.links.rank
 
 # Copy requirement file first (to leverage Docker layer caching)
 COPY requirements.txt .
@@ -13,10 +18,10 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
+RUN python -m nltk.downloader punkt punkt_tab
+
 # Copy the rest of the application
 COPY . .
-
-RUN python3 setup.py
 
 # Expose FastAPI port
 EXPOSE 8000

@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+DEBUG = False
+
 import requests
 import random
 import argparse
-from collections import defaultdict as dd
+from collections import defaultdict as ddict
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from fastapi.responses import RedirectResponse
 
 from pymongo import MongoClient
-from pymongo.database import Database
+# from pymongo.database import Database, Collection
 
 import logging
 
@@ -55,10 +57,16 @@ cache = db['cache']
 
 page_rank = {}
 
-with open('pagerank/2025-11-05.allwiki.links.rank', 'r') as f:
-    for line in f:
-        entity, rank = line.split('\t')
-        page_rank[entity.strip()] = int(float(rank.strip())*100)
+logger.info('Loading PageRank files...')
+try:
+    with open('pagerank/2025-11-05.allwiki.links.rank', 'r') as f:
+        for line in f:
+            entity, rank = line.split('\t')
+            page_rank[entity.strip()] = int(float(rank.strip())*100)
+        logger.info('PageRank file loaded successfully')
+except Exception as e:
+    logger.error(f'Error loading PageRank file in function main of dynbench.py: {e}. Exiting...')
+    exit(1)
 
 LANGUAGES = {
     'en': 'English',
@@ -68,17 +76,28 @@ LANGUAGES = {
     'uk': 'Ukrainian',
 }
 
-PREDICATES = ('wdt:P31', 'wdt:P279', 'wdt:P106')
+PREDICATES = ('wdt:P31', 'wdt:P279', )
 
 
-def get_resources_types(item, cache=None, predicates=[]):
-    """Get the types of the resources in the item."""
+def get_resources_types(info: dict, cache=None, predicates: list=[]) -> dict:
+    """
+    Collect properties of entities for the item by given predicates.
+
+    Args:
+        info (dict): Information about a benchmark's record.
+        cache (Collection, optional): MongoDB collection for caching.
+        predicates (list): List of predicates to filter types.
+    Returns:
+        Dictionary with properties for each entity (predicates are ignored).
+    Raises:
+        KeyboardInterrupt: If the operation is interrupted by the user.
+    """
     results = {}
 
     if not predicates:
         return results
 
-    for entity in item['resources']:
+    for entity in info['resources']:
         if not entity.startswith('wd:'):
             continue
 
@@ -90,10 +109,11 @@ def get_resources_types(item, cache=None, predicates=[]):
             r = {p: [v['o'] for v in r if v['p'] == p] for p in predicates}
             for i in predicates:
                 r[i].sort(key=extract_q_number)
+
+            logger.info(f'Collected properties for entity {entity}.')
         except KeyboardInterrupt:
             raise
-        except Exception as e:
-            logger.warning(f'Skipped exception in function get_resources_types: {e}')
+        except:
             continue
 
         results[entity] = r
@@ -101,34 +121,47 @@ def get_resources_types(item, cache=None, predicates=[]):
     return results
 
 
-def get_conditions_by_predicates(item, predicates):
-    conditions = dd(dict)
+def get_conditions_by_predicates(info: dict, predicates: list=[]) -> dict:
+    """
+    Create condition substrings for SPARQL query based on given predicates.
     
-    for entity in item['resources']:
+    Args:
+        info (dict): Information about a benchmark's record.
+        predicates (list): List of predicates to filter types.
+    """
+    conditions = ddict(dict)
+    
+    for entity in info['resources']:
         if not entity.startswith('wd:'):
             continue
 
         for predicate in predicates:
-            properties = item['types'][entity][predicate]
+            properties = info['types'][entity][predicate]
             conditions[entity][predicate] = [f'?subst {predicate} {i}' for i in properties]
 
     return conditions
 
 
-def get_query_conditions(item):
+
+def get_query_conditions(info: dict) -> dict:
     """
-    get conditions from the query, so new entities will be connected to the same properties
+    Create condition substrings for SPARQL from the query triples.
+    
+    Args:
+        info (dict): Information about a benchmark's record.
+    Returns:
+        Dictionary with query conditions for each entity.
     """
     query_conditions = {}
 
-    for entity in item['resources']:
+    for entity in info['resources']:
         if not entity.startswith('wd:'):
             continue
 
         query_conditions[entity] = []
 
         v = 0
-        for triple in item['triples']:
+        for triple in info['triples']:
             if entity not in triple:
                 continue
             
@@ -146,9 +179,18 @@ def get_query_conditions(item):
     return query_conditions
 
 
-def find_substitutes(query, info, cache=None):
+def find_substitutes(query: str, info: dict, cache=None) -> list:
     """
     Find possible substitutes for the each entity in the item.
+
+    Args:
+        query (str): SPARQL query.
+        info (dict): Information about a benchmark's record.
+        cache (Collection, optional): MongoDB collection for caching.
+    Returns:
+        List of dictionaries with substitute information for each entity.
+    Raises:
+        KeyboardInterrupt: If the operation is interrupted by the user.
     """
     entities = [i for i in info['resources'] if i.startswith('wd:')]
     substitutes = []
@@ -170,6 +212,9 @@ def find_substitutes(query, info, cache=None):
         try:
             result = execute(extract_query, WIKIDATA_ENDPOINT, WIKIDATA_AGENT, cache=cache)
             result = sparql_results_to_list_of_dicts(result)
+
+            logger.info(f'Found {len(result)} potential substitutes for entity {entity}.')
+
             for r in result:
                 r['old'] = entity
             substitutes.append({ 'query': query, 'entity': entity, 'extract': extract_query, 'results': result })
@@ -182,12 +227,22 @@ def find_substitutes(query, info, cache=None):
     return substitutes
 
 
-def call_LLM(url, key, model, prompt, temp=0.0, max_tokens=1000):
-    """Call the Ollama API to generate a response based on the provided model and prompt."""   
-    headers = {
-        'content-type': 'application/json',
-        'Authorization': f'Bearer {key}',
-    }
+def call_LLM(url: str, key: str, model: str, prompt, temp: float=0.0, max_tokens: int=1000, timeout=30.0,) -> dict | None:
+    """Call the openAI/Ollama API to generate a response based on the provided model and prompt.
+    
+    Args:
+        url (str): The API endpoint URL.
+        key (str): The API key for authentication.
+        model (str): The model to use for generation.
+        prompt (str): The input prompt for the model.
+        temp (float, optional): The temperature for generation. Defaults to 0.0.
+        max_tokens (int, optional): The maximum number of tokens to generate. Defaults to 1000.
+        timeout (float, optional): The timeout for the API request in seconds. Defaults to 30.0.
+    Returns:
+        dict | None: The JSON response from the API if successful, otherwise None.
+    Raises:
+        KeyboardInterrupt: If the operation is interrupted by the user
+    """
     data = {
         'model': model,
         'prompt': prompt,
@@ -197,21 +252,53 @@ def call_LLM(url, key, model, prompt, temp=0.0, max_tokens=1000):
             'num_predict': max_tokens,
         }
     }
-    response = requests.post(url, json=data, headers=headers)
 
-    return response.json() if response.status_code == 200 else None
+    try:
+        response = requests.post(
+            url, 
+            json=data, 
+            headers = { 'content-type': 'application/json', 'Authorization': f'Bearer {key}' },
+            timeout=timeout
+        )
+        return response.json() if response.status_code == 200 else None
+
+    except requests.exceptions.Timeout:
+        logger.error(f'Timeout error while executing query: {query}')
+    except requests.exceptions.ConnectionError:
+        logger.error(f'Connection error while executing query: {query}')
+    except requests.exceptions.RequestException as e:
+        logger.error(f'Request exception in function "execute": {e}')
+    except KeyboardInterrupt:
+        raise
+    except Exception as e:
+        logger.error(f'Exception in function "execute": {e}')
+
+    return None
 
 
-def replace_entity(model, question, query, entity, new_entity, lang='en'):
+
+def replace_entity(model: str, question: str, query: str, entity: str, new_entity: str, lang: str='en') -> tuple[str | None, str | None]:
     """
     Replace the entity in the question and query with a new entity.
+
+    Args:
+        model (str): Name of LLM model to use.
+        question (str): Original question.
+        query (str): Original SPARQL query.
+        entity (str): Entity to be replaced.
+        new_entity (str): New entity to replace with.
+        lang (str): Language of the question ('en', 'de', 'fr', 'ru', 'uk').
+    Returns:
+        Tuple of (new_query, new_question) or (None, None) if replacement failed.
     """
-    old_label= get_wikidata_label(uri=entity, endpoint_url=WIKIDATA_ENDPOINT, agent=WIKIDATA_AGENT, lang=lang, cache=cache)
-    new_label= get_wikidata_label(uri=new_entity, endpoint_url=WIKIDATA_ENDPOINT, agent=WIKIDATA_AGENT, lang=lang, cache=cache)
+    old_label= get_wikidata_label(entity, WIKIDATA_ENDPOINT, WIKIDATA_AGENT, lang=lang, cache=cache)
+    new_label= get_wikidata_label(new_entity, WIKIDATA_ENDPOINT, WIKIDATA_AGENT, lang=lang, cache=cache)
 
     if not old_label or not new_label:
         return None, None
     
+    logger.info(f'Replacing {old_label} -> {new_label}.')
+
     new_query = query.replace(entity, new_entity)
 
     prompt = (
@@ -226,17 +313,24 @@ def replace_entity(model, question, query, entity, new_entity, lang='en'):
     new_question = call_LLM(LLM_URL, KEY, model, prompt, 0.0)
 
     if not new_question:
+        logger.error(f'Replace {old_label} -> {new_label} failed.')
         return None, None
     
     return new_query, new_question['response']
+
     
 
-def build_pagerank_list(substitutes):
+def build_pagerank_list(substitutes: list) -> list:
     """
     creates list of tuples for later sorting:
-        original pagerank
-        new pagerank
-        replace dict
+        original pagerank;
+        new pagerank;
+        replace dict.
+
+    Args:
+        substitutes: List of dictionaries with substitute information for each entity.
+    Returns:
+        List of tuples (original_pagerank, new_pagerank, replace_dict).
     """
     result = []
 
@@ -250,13 +344,31 @@ def build_pagerank_list(substitutes):
 
 
 def count_sentences(s: str) -> int:
-    """Count the number of sentences in the string."""
+    """Count the number of sentences in the string.
+    Args:
+        s: Input string.
+    Returns:
+        Number of sentences in the string.
+    """
     n = sent_tokenize(s)
     return len(n)
 
 
-def get_info(query: str, cache=None):
-    """Get the information about the query."""
+def get_info(query: str, cache=None) -> dict:
+    """Get the information about the query.
+        Triples: list of triples in the query.
+        Resources: list of entities and predicates in the query.
+        Types: properties of resources in the query.
+        Conditions: condition substrings for SPARQL query based on given predicates.
+        Query conditions: condition substrings for SPARQL from the query triples.
+        Substitutes: possible substitutes for each entity in the query.
+
+    Args:
+        query: SPARQL query string.
+        cache: Optional cache database.
+    Returns:
+        Dictionary with information about the query.
+    """
     info = {}
     info['triples'] = [i for i in parse_query(query) if all(i)]
     info['resources'] = extract_entities(query)
@@ -275,6 +387,7 @@ def get_info(query: str, cache=None):
     for u in unic_replaces:
         u['new'] = u.pop('subst')
 
+    # 
     for r in unic_replaces:
         for a in all_replaces:
             if a['old'] == r['old'] and a['subst'] == r['new']:
@@ -297,21 +410,19 @@ def sort_replaces_by_complexity(replaces, complexity):
     Sort or shuffle the replaces list based on the complexity level.
     
     Args:
-        replaces: List of tuples (original_pagerank, new_pagerank, replace_dict)
-        complexity: One of 'easy', 'normal', 'hard', or 'random'
-    
+        replaces: List of tuples (original_pagerank, new_pagerank, replace_dict).
+        complexity: One of 'easy', 'normal', 'hard', or 'random'.
     Returns:
-        Sorted or shuffled list of replaces
-    
+        Sorted or shuffled list of replaces.
     Raises:
-        ValueError: If complexity is not one of the valid options
+        ValueError: If complexity is not one of the valid options.
     """
     if complexity == 'easy':
-        return sorted(replaces, key=lambda x: x[1], reverse=True)  # easy
+        return sorted(replaces, key=lambda x: x[1])  # easy
     elif complexity == 'normal':
         return sorted(replaces, key=lambda x: abs(x[0]-x[1]))  # normal
     elif complexity == 'hard':
-        return sorted(replaces, key=lambda x: x[1])  # hard
+        return sorted(replaces, key=lambda x: x[1], reverse=True)  # hard
     elif complexity == 'random':
         shuffled = replaces.copy()
         random.shuffle(shuffled)
@@ -320,15 +431,29 @@ def sort_replaces_by_complexity(replaces, complexity):
         raise ValueError(f'Complexity can only be easy/normal/hard/random. Got: {complexity}')
 
 
-def create_question_query(query, question, model, lang, complexity, cache=None):
-    """Create a new question and query by replacing one entity."""
+def create_question_query(query: str, question: str, model: str, lang: str, complexity: str, cache=None):
+    """Create a new question and query by replacing one entity.
+
+
+    Args:
+        query: Original SPARQL query.
+        question: Original question.
+        model: Name of LLM model to use.
+        lang: Language of the question ('en', 'de', 'fr', 'ru', 'uk').
+        complexity: Complexity level ('easy', 'normal', 'hard', 'random').
+        cache: MongoDB-like cache database. Must support find_one and insert_one methods.
+    Returns:
+        Tuple of (new_question, new_query) or (None, None) if no valid replacement found.
+    Raises:
+        Exception: If an error occurs during processing.
+    """
     info = get_info(query, cache)
 
     replaces = build_pagerank_list(info['substitutes'])
     replaces = sort_replaces_by_complexity(replaces, complexity)
 
     for replace in replaces:
-        replace = replace[2]
+        old_pagerank, new_pagerank, replace = replace
 
         old_label = get_wikidata_label(replace['old'], WIKIDATA_ENDPOINT, WIKIDATA_AGENT, lang=lang, cache=cache)
         if not old_label:
@@ -351,34 +476,30 @@ def create_question_query(query, question, model, lang, complexity, cache=None):
             new_len = count_sentences(new_question)
 
             if new_len != old_len:
+                logger.info(f'Sentence count check failed (changed from {old_len} to {new_len}). Skipping replacement.')
                 continue
 
             _, restored_question = replace_entity(model, new_question, new_query, replace['new'], replace['old'], lang)
             restored_question = restored_question.strip(' ,\n\t')
             dist =  get_levenshtein_distance(question, restored_question)
             if dist > 4:
+                logger.info(f'Back-transform failed (Levenshtein distance: {dist}). Skipping replacement.')
                 continue
+
+            new_label = get_wikidata_label(replace['new'], WIKIDATA_ENDPOINT, WIKIDATA_AGENT, lang=lang, cache=cache)
+            logger.info(f'Successfully created new question and query by replacing {old_label} -> {new_label}.')
+            logger.info(f'Original entity: {replace["old"]} ({old_label}),  PageRank: {old_pagerank}.')
+            logger.info(f'New entity: {replace["new"]} ({new_label}), PageRank: {new_pagerank}.')
 
             return new_question, new_query
         except KeyboardInterrupt:
             raise
         except Exception as e:
-            logger.error(f'Error in create_new_question_query. Question: {question}. Query: {query}. Languaage: {lang}. Error: {e}.')
+            logger.error(f'Exception in create_new_question_query: {e}.')
             continue
         
     return None, None
         
-
-# DEBUG
-# query = 'SELECT ?answer WHERE { wd:Q14452 wdt:P17 ?answer }'
-# create_question_query(
-#     query,
-#     'Which country does the famous Easter island belong to?',
-#     'Gemma3:27b',
-#     'en', 
-#     'normal',
-#     cache,
-# )
 
 def main():
     parser = argparse.ArgumentParser(description="Transform question and query over Wikidata by replacing one entity.")
@@ -408,23 +529,12 @@ def main():
     lang = args.lang
     model = args.model
 
-    logger.info('Loading PageRank files...')
-    try:
-        with open('pagerank/2025-11-05.allwiki.links.rank', 'r') as f:
-            for line in f:
-                entity, rank = line.split('\t')
-                page_rank[entity.strip()] = int(float(rank.strip())*100)
-            logger.info('PageRank file loaded successfully')
-    except Exception as e:
-        logger.error(f'Error loading PageRank file in function main of dynbench.py: {e}. Exiting...')
-        exit(1)
-
     new_question, new_query = create_question_query(query, question, model, lang, complexity, cache)
 
-    print('   Original Question:', question)
-    print('      Original Query:', query)
-    print('Transformed Question:', new_question)
-    print('   Transformed Query:', new_query)
+    logger.info(f'Original Question: {question}')
+    logger.info(f'Original Query: {query}')
+    logger.info(f'Transformed Question: {new_question}')
+    logger.info(f'Transformed Query: {new_query}')
 
 
 app = FastAPI()
@@ -446,7 +556,11 @@ class TransformResponse(BaseModel):
 
 
 @app.post("/transform", response_model=TransformResponse)
-def transform_endpoint(request: TransformRequest):
+def transform_endpoint(request: TransformRequest) -> TransformResponse:
+    """Transform the question and query by replacing one entity.
+    Args:
+        request (TransformRequest): The request body containing question, query, model, lang, and complexity.
+    """
     if request.lang not in LANGUAGES:
         raise HTTPException(status_code=400, detail=f"Unsupported language: {request.lang} (supported: {', '.join(LANGUAGES.keys())})")
     
@@ -487,7 +601,17 @@ def health_check():
     return {"status": "healthy"}
 
 
-if __name__ == "__main__":
-    main()
+if DEBUG:
+    query = 'SELECT ?answer WHERE { wd:Q14452 wdt:P17 ?answer }'
+    create_question_query(
+        query,
+        'Which country does the famous Easter island belong to?',
+        'Gemma3:27b',
+        'en', 
+        'normal',
+        cache,
+    )
+else:
+    if __name__ == "__main__":
+        main()
 
-    ## dynbench.py

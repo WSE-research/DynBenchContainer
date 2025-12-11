@@ -1,0 +1,56 @@
+services:
+  dynbench:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dynbench
+    depends_on:
+      - mongodb
+      - ollama
+    environment:
+      MONGO_HOST: mongodb://mongodb:27017/wikidata
+      LLM_URL: http://ollama:11434/api/generate
+    networks:
+      - backend
+    ports:
+      - "8000:8000"
+
+  mongodb:
+    image: mongo:7.0
+    container_name: mongodb
+    command: ["mongod", "--quiet", "--logpath", "/dev/null"]
+    restart: always
+    environment:
+      MONGO_INITDB_DATABASE: wikidata
+    volumes:
+      - ./mongo/init/:/docker-entrypoint-initdb.d/
+      - mongo_data:/data/db
+    networks:
+      - backend
+
+  ollama:
+    image: ollama/ollama:latest
+    entrypoint:
+      [
+        "/bin/bash",
+        "-c",
+        "ollama serve > /dev/null 2>&1 & sleep 10 && ollama pull mistral-small > /dev/null 2>&1 2>&1 && wait",
+      ]    
+    container_name: ollama
+    restart: unless-stopped
+    networks:
+      - backend
+    volumes:
+      - ollama_models:/root/.ollama   # persist downloaded models
+    environment:
+      OLLAMA_KEEP_ALIVE: "30m"        # optional, keeps models in memory
+      OLLAMA_HOST: "0.0.0.0"
+      OLLAMA_DEBUG: "0"
+      OLLAMA_LOG: "false"
+
+networks:
+  backend:
+
+volumes:
+  mongo_data:
+  ollama_models:

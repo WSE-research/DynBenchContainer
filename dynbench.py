@@ -9,6 +9,8 @@ import random
 import argparse
 from collections import defaultdict as ddict
 
+import threading
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from fastapi.responses import RedirectResponse
@@ -278,14 +280,13 @@ def call_LLM(url: str, key: str, model: str, prompt, temp: float=0.0, max_tokens
     except requests.exceptions.ConnectionError:
         logger.error(f'Connection error while executing query: {query}')
     except requests.exceptions.RequestException as e:
-        logger.error(f'Request exception in function "execute": {e}')
+        logger.error(f'Request exception in function "call_LLM": {e}')
     except KeyboardInterrupt:
         raise
     except Exception as e:
-        logger.error(f'Exception in function "execute": {e}')
+        logger.error(f'Exception in function "call_LLM": {e}')
 
     return None
-
 
 
 def replace_entity(model: str, question: str, query: str, entity: str, new_entity: str, lang: str='en') -> tuple[str | None, str | None]:
@@ -329,7 +330,6 @@ def replace_entity(model: str, question: str, query: str, entity: str, new_entit
     
     return new_query, new_question['response']
 
-    
 
 def build_pagerank_list(substitutes: list) -> list:
     """
@@ -483,7 +483,7 @@ def create_question_query(query: str, question: str, model: str, lang: str, comp
 
         old_label = get_wikidata_label(replace['old'], WIKIDATA_ENDPOINT, WIKIDATA_AGENT, lang=lang, cache=cache)
         if not old_label:
-            return None, None
+            return None, None, None, None
         new_label = get_wikidata_label(replace['new'], WIKIDATA_ENDPOINT, WIKIDATA_AGENT, lang=lang, cache=cache)
         if not new_label:
             continue
@@ -495,6 +495,8 @@ def create_question_query(query: str, question: str, model: str, lang: str, comp
         new_query = None
 
         try:
+            # !TODO if label of item is different from used in the question then all back-transforms are failing
+            #       set a max number of repeats for one entity
             logger.info(f'Replace {old_label} -> {new_label}.')
             new_query, new_question = replace_entity(model, question, query, replace['old'], replace['new'], lang)
             if not new_question or not new_query:
@@ -528,7 +530,7 @@ def create_question_query(query: str, question: str, model: str, lang: str, comp
             logger.error(f'Exception in create_question_query: {e}.')
             continue
         
-    return None, None
+    return None, None, None, None
         
 
 def main():
@@ -589,6 +591,9 @@ class TransformResponse(BaseModel):
     new_pagerank: float | None
 
 
+# lock to prevent multply calls
+transform_lock = threading.Lock()
+
 @app.post("/transform", response_model=TransformResponse)
 def transform_endpoint(request: TransformRequest) -> TransformResponse:
     """Transform the question and query by replacing one entity.
@@ -596,11 +601,23 @@ def transform_endpoint(request: TransformRequest) -> TransformResponse:
         request (TransformRequest): The request body containing question, query, model, lang, and complexity.
     """
     if request.lang not in LANGUAGES:
-        raise HTTPException(status_code=400, detail=f"Unsupported language: {request.lang} (supported: {', '.join(LANGUAGES.keys())})")
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Unsupported language: {request.lang} (supported: {', '.join(LANGUAGES.keys())})"
+        )
     
     if request.complexity not in ['easy', 'normal', 'hard', 'random']:
-        raise HTTPException(status_code=400, detail=f"Invalid complexity: {request.complexity} (supported: easy, normal, hard, random)")
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Invalid complexity: {request.complexity} (supported: easy, normal, hard, random)"
+        )
     
+    if not transform_lock.acquire(blocking=False):
+        raise HTTPException(
+            status_code=503,
+            detail="System is busy. Please try again later."
+        )
+            
     try:
         new_question, new_query, old_pagerank, new_pagerank = create_question_query(
             request.query,
@@ -621,9 +638,13 @@ def transform_endpoint(request: TransformRequest) -> TransformResponse:
         )
     
     except Exception as e:
-        logger.error(f"Error in transform endpoint: {e} (request: {request})")
+        logger.error(f"Error in transform endpoint: {e} \n(request: {request})")
         raise HTTPException(status_code=500, detail=str(e))
     
+    finally:
+        # Always release the lock so the endpoint becomes available again
+        transform_lock.release()
+
 
 @app.get("/")
 def read_root():

@@ -3,7 +3,9 @@
 
 DEBUG = False
 
-import sys
+# import sys
+import traceback
+
 import requests
 import random
 import argparse
@@ -24,10 +26,13 @@ from decouple import Config, RepositoryEnv
 
 from nltk.tokenize import sent_tokenize
 
-from dynutils import execute, get_wikidata_label, sparql_results_to_list_of_dicts
+from dynutils import execute as raw_execute
+from dynutils import get_wikidata_label, sparql_results_to_list_of_dicts
 from dynutils import parse_query, extract_entities
 from dynutils import extract_q_number, check_productivity_single
 from dynutils import get_levenshtein_distance
+
+from mongocache import MongoCache
 
 
 logging.config.dictConfig(LOGGING_CONFIG)
@@ -48,11 +53,11 @@ WIKIDATA_ENDPOINT = config('WIKIDATA_ENDPOINT')
 
 KEY = config('KEY')
 
-logger.debug(f'Mongo host: {MONGO_HOST}')
-logger.debug(f'Mongo user: {MONGO_USER}')
-logger.debug(f'Wikidata endpoint: {WIKIDATA_ENDPOINT}')
-logger.debug(f'Wikidata agent: {WIKIDATA_AGENT}')
-logger.debug(f'LLM URL: {LLM_URL}')
+logger.info(f'Mongo host: {MONGO_HOST}')
+logger.info(f'Mongo user: {MONGO_USER}')
+logger.info(f'Wikidata endpoint: {WIKIDATA_ENDPOINT}')
+logger.info(f'Wikidata agent: {WIKIDATA_AGENT}')
+logger.info(f'LLM URL: {LLM_URL}')
 
 mongo = MongoClient(
     MONGO_HOST,
@@ -61,8 +66,20 @@ mongo = MongoClient(
 )
 
 db = mongo['wikidata']
-cache = db['cache']
+cache_collection = db['cache']
+cache = MongoCache(cache_collection, 1024*1024)
 
+logger.info(f'Cache contains {cache.count_documents({})} records.')
+
+
+try:
+    r = requests.get(LLM_URL.replace('/api/generate', ''), )
+    logger.info(f'LLM status: {r.status_code}')
+except:
+    logger.error('Error connecting LLM, exiting...')
+    exit(1)
+    
+    
 page_rank = {}
 
 logger.info('Loading PageRank file...')
@@ -71,12 +88,13 @@ try:
         for x, line in enumerate(f):
             entity, rank = line.split('\t')
             page_rank[entity.strip()] = int(float(rank.strip())*100)
-            if x % 11069 == 0:
-                print(f'Loaded {x+1:,} records.'.replace(',', ' '), file=sys.stderr, end='\r')
+            if x and x % (11069*29*13) == 0:
+                logger.info(f'Loaded {x+1:,} records.'.replace(',', ' '))
     logger.info('PageRank file loaded successfully')
 except Exception as e:
     logger.error(f'Error loading PageRank file in dynbench.py: {e}. Exiting...')
     exit(1)
+
 
 LANGUAGES = {
     'en': 'English',
@@ -87,6 +105,11 @@ LANGUAGES = {
 }
 
 PREDICATES = ('wdt:P31', 'wdt:P279', )
+
+
+@cache.fifo_cache(using={'query'})
+def execute(query: str, delay=2.0, timeout=30.0,) -> dict | None:
+    return raw_execute(query, WIKIDATA_ENDPOINT, WIKIDATA_AGENT, cache=None)
 
 
 def get_resources_types(info: dict, cache=None, predicates: list=[]) -> dict:
@@ -114,7 +137,7 @@ def get_resources_types(info: dict, cache=None, predicates: list=[]) -> dict:
         query = 'SELECT DISTINCT ?p ?o WHERE { VALUES ?p { ' + ' '.join(predicates) + ' } ' + entity + ' ?p ?o }'
 
         try:
-            r = execute(query, WIKIDATA_ENDPOINT, WIKIDATA_AGENT, cache=cache)
+            r = execute(query)
             r = sparql_results_to_list_of_dicts(r)
             r = {p: [v['o'] for v in r if v['p'] == p] for p in predicates}
             for i in predicates:
@@ -153,7 +176,6 @@ def get_conditions_by_predicates(info: dict, predicates: list=[]) -> dict:
             conditions[entity][predicate] = [f'?subst {predicate} {i}' for i in properties]
 
     return conditions
-
 
 
 def get_query_conditions(info: dict) -> dict:
@@ -223,7 +245,7 @@ def find_substitutes(query: str, info: dict, cache=None) -> list:
         extract_query = '\n'.join(extract_query)
 
         try:
-            result = execute(extract_query, WIKIDATA_ENDPOINT, WIKIDATA_AGENT, cache=cache)
+            result = execute(extract_query)
             result = sparql_results_to_list_of_dicts(result)
 
             logger.info(f'Found {len(result)} potential substitutes for entity {entity}.')
@@ -240,7 +262,8 @@ def find_substitutes(query: str, info: dict, cache=None) -> list:
     return substitutes
 
 
-def call_LLM(url: str, key: str, model: str, prompt, temp: float=0.0, max_tokens: int=1000, timeout=30.0,) -> dict | None:
+@cache.fifo_cache(using={'model', 'prompt', 'temp', 'max_tokens'})
+def call_LLM(url: str, key: str, model: str, prompt, temp: float=0.0, max_tokens: int=1000, timeout=30.0) -> dict | None:
     """Call the openAI/Ollama API to generate a response based on the provided model and prompt.
     
     Args:
@@ -273,12 +296,14 @@ def call_LLM(url: str, key: str, model: str, prompt, temp: float=0.0, max_tokens
             headers = { 'content-type': 'application/json', 'Authorization': f'Bearer {key}' },
             timeout=timeout
         )
+        if response.status_code == 200:
+            logger.error(f'Error call LLM: {response.text}')
         return response.json() if response.status_code == 200 else None
 
     except requests.exceptions.Timeout:
-        logger.error(f'Timeout error while executing query: {query}')
+        logger.error(f'Timeout error while executing prompt')
     except requests.exceptions.ConnectionError:
-        logger.error(f'Connection error while executing query: {query}')
+        logger.error(f'Connection error while executing prompt')
     except requests.exceptions.RequestException as e:
         logger.error(f'Request exception in function "call_LLM": {e}')
     except KeyboardInterrupt:
@@ -321,7 +346,7 @@ def replace_entity(model: str, question: str, query: str, entity: str, new_entit
     prompt = '\n'.join(prompt)
 
     logger.debug('Calling LLM to replace entity in question...')
-    new_question = call_LLM(LLM_URL, KEY, model, prompt, 0.0)
+    new_question = call_LLM(LLM_URL, KEY, model, prompt, temp=0.0, timeout=600)
     logger.debug('LLM call completed.')
 
     if not new_question:
@@ -458,7 +483,6 @@ def sort_replaces_by_complexity(replaces, complexity):
 def create_question_query(query: str, question: str, model: str, lang: str, complexity: str, cache=None):
     """Create a new question and query by replacing one entity.
 
-
     Args:
         query: Original SPARQL query.
         question: Original question.
@@ -528,6 +552,7 @@ def create_question_query(query: str, question: str, model: str, lang: str, comp
             raise
         except Exception as e:
             logger.error(f'Exception in create_question_query: {e}.')
+            logger.error(traceback.format_exc())
             continue
         
     return None, None, None, None

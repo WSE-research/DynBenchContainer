@@ -1,3 +1,4 @@
+from inspect import signature
 from functools import wraps
 from typing import Callable
 
@@ -28,11 +29,19 @@ class MongoCache:
         if doc:
             self.collection.delete_one({ '_id': doc['_id'] })
 
-    def fifo_cache(self):
+    def fifo_cache(self, using=None):
         def decorator(func: Callable):
             @wraps(func)
             def wrapper(*args, **kwargs):
-                key = f"{func.__name__}-{str(args) if args else ''}{str(kwargs) if kwargs else ''}"
+                sign = signature(func)
+                bound_args = sign.bind(*args, **kwargs)
+                bound_args.apply_defaults()
+                
+                key = []
+                for name, value in bound_args.arguments.items():
+                    if not using or name in using:
+                        key.append(f'{name}={value}')
+                key = f"{func.__name__}({', '.join(key)})"
 
                 result = self.get(key)
                 if result is not None:

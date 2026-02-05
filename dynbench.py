@@ -69,7 +69,7 @@ db = mongo['wikidata']
 cache_collection = db['cache']
 cache = MongoCache(cache_collection, 1024*1024)
 
-logger.info(f'Cache contains {cache.count_documents({})} records.')
+logger.info(f'Cache contains {cache_collection.count_documents({})} records.')
 
 
 try:

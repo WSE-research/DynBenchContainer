@@ -34,7 +34,7 @@ def wait_time(wait: float, timer_ID: Hashable=None, asynchronous: bool=True) -> 
         wait: Minimum time interval (in seconds) to wait
         timer_ID: Identifier for the timer. If None, uses default timer
         asynchronous: If False, blocks execution until time condition is met, 
-             result immediately otherwise.
+            result immediately otherwise.
 
     Returns:
         bool: If True, enough time has passed since last call 
@@ -180,26 +180,20 @@ FIXED_LABELS = {
 }
 
 
-def execute(query: str, endpoint_url: str, agent: str, delay=2.0, timeout=30.0, cache=None) -> dict | None:
+def execute(query: str, endpoint_url: str, agent: str, delay=2.0, timeout=30.0) -> dict | None:
     """
-    Check cache first, then send query direct to endpoint.
+    Send query direct to endpoint.
 
     Args:
         query: SPARQL query
         endpoint_url: endpoint of SPARQL query service
         agent: User-Agent string for the request
         delay: guaranteed delay between requests in seconds
-        cache: optional MongoDB-like collection for caching results. Must support `find_one` and `insert_one` methods.
     Returns:
         json response from the SPARQL endpoint, or None if an error occurred
     Raises:
         KeyboardInterrupt: If the operation is interrupted by the user
     """
-    if cache is not None:
-        r = cache.find_one({ 'query': query, })
-        if r:
-            return r['result']
-
     if delay:
         wait_time(delay, 'wikidata', asynchronous=False)
 
@@ -213,8 +207,6 @@ def execute(query: str, endpoint_url: str, agent: str, delay=2.0, timeout=30.0, 
 
         if r.status_code == 200:
             r = r.json()
-            if cache is not None:
-                cache.insert_one({ 'query': query, 'result': r })
             return r
 
     except requests.exceptions.Timeout:
@@ -474,98 +466,66 @@ def sparql_results_to_list_of_dicts(result: dict) -> list[dict]:
     return [{k: v['value'] if v['type'] == 'literal' else uri2short(v['value'], WIKIDATA_PREFIX) for k, v in i.items()} for i in result]
 
 
-def query_wikidata_label(uri: str, endpoint_url, agent: str='', lang: str='en', cache=None) -> str:
-    """
-    Query the Wikidata label for a given URI.
+# def query_wikidata_label(uri: str, endpoint_url, agent: str='', lang: str='en') -> str:
+#     """
+#     Query the Wikidata label for a given URI.
     
-    :param uri: Wikidata resource URI
-    :type uri: str
-    :param endpoint_url: SPARQL endpoint URL
-    :type endpoint_url: str
-    :param agent: User-Agent string for the request
-    :type agent: str
-    :param lang: Language code for the label (default is 'en')
-    :type lang: str
-    :param cache: mongoDB-like collection for caching results. Must support `find_one` and `insert_one` methods.
-    :type cache: object, optional
-    :return: Label for the URI in the specified language, or None if not found
-    :rtype: str
-    """
-    if uri in FIXED_LABELS:
-        return FIXED_LABELS[uri]
+#     :param uri: Wikidata resource URI
+#     :type uri: str
+#     :param endpoint_url: SPARQL endpoint URL
+#     :type endpoint_url: str
+#     :param agent: User-Agent string for the request
+#     :type agent: str
+#     :param lang: Language code for the label (default is 'en')
+#     :type lang: str
+#     :return: Label for the URI in the specified language, or None if not found
+#     :rtype: str
+#     """
+#     if uri in FIXED_LABELS:
+#         return FIXED_LABELS[uri]
 
-    query = (
-        'SELECT ?label WHERE {',
-            f"OPTIONAL {{ {uri} rdfs:label ?lang_label. FILTER(LANG(?lang_label) = '{lang}') }}",
-            f"OPTIONAL {{ {uri} rdfs:label ?default_label. FILTER(LANG(?default_label) = 'mul') }}",
-            f"OPTIONAL {{ {uri} owl:sameAs+ ?redirect . ?redirect rdfs:label ?redirect_label . FILTER(LANG(?redirect_label) = '{lang}') }}",
-            "BIND(COALESCE(?lang_label, ?default_label, ?redirect_label) AS ?label) . ",
-        '}',
-    )
+#     query = (
+#         'SELECT ?label WHERE {',
+#             f"OPTIONAL {{ {uri} rdfs:label ?lang_label. FILTER(LANG(?lang_label) = '{lang}') }}",
+#             f"OPTIONAL {{ {uri} rdfs:label ?default_label. FILTER(LANG(?default_label) = 'mul') }}",
+#             f"OPTIONAL {{ {uri} owl:sameAs+ ?redirect . ?redirect rdfs:label ?redirect_label . FILTER(LANG(?redirect_label) = '{lang}') }}",
+#             "BIND(COALESCE(?lang_label, ?default_label, ?redirect_label) AS ?label) . ",
+#         '}',
+#     )
 
-    try:
-        data = execute('\n'.join(query), endpoint_url, agent, cache=cache)
-        data = data['results']['bindings'][0]
-        data = data['label']['value']
-    except KeyboardInterrupt:
-        raise
-    except Exception as e:
-        logger.error(f'Exception in function "query_wikidata_label". URI: {uri}, lang: {lang}, error: {e}')
-        return None
+#     try:
+#         data = execute('\n'.join(query), endpoint_url, agent)
+#         data = data['results']['bindings'][0]
+#         data = data['label']['value']
+#     except KeyboardInterrupt:
+#         raise
+#     except Exception as e:
+#         logger.error(f'Exception in function "query_wikidata_label". URI: {uri}, lang: {lang}, error: {e}')
+#         return None
 
-    return data
+#     return data
 
 
-def get_wikidata_label(uri: str, endpoint_url: str, agent: str='', lang: str='en', cache=None, prefixes=WIKIDATA_PREFIX) -> str:
-    """ Get label for a given Wikidata URI.
-    uri: Wikidata resource URI
-    endpoint_url: SPARQL endpoint URL
-    :type endpoint_url: str
-    agent: User-Agent string for the request
-    :type agent: str
-    lang: language code for the label (default is 'en')
-    :type lang: str
-    cache: optional cache object to store and retrieve labels
-        cache must have methods `find_one` and `insert_one`
-    return: label for the URI in the specified language, or None if not found
-    """
-    try:
-        uri = uri2short(uri, prefixes)
-        prefix = 'wd' # it works despite property or entity
-        index = uri.split(':')[-1]
-        return query_wikidata_label(f'{prefix}:{index}', endpoint_url, agent, lang, cache)
-    except Exception as e:
-        logger.error(f'Exception in function "get_wikidata_label". URI: {uri}, lang: {lang}, error: {e}')
-        return None
+# def get_wikidata_label(uri: str, endpoint_url: str, agent: str='', lang: str='en', prefixes=WIKIDATA_PREFIX) -> str:
+#     """ Get label for a given Wikidata URI.
+#     uri: Wikidata resource URI
+#     endpoint_url: SPARQL endpoint URL
+#     :type endpoint_url: str
+#     agent: User-Agent string for the request
+#     :type agent: str
+#     lang: language code for the label (default is 'en')
+#     :type lang: str
+#     return: label for the URI in the specified language, or None if not found
+#     """
+#     try:
+#         uri = uri2short(uri, prefixes)
+#         prefix = 'wd' # it works despite property or entity
+#         index = uri.split(':')[-1]
+#         return query_wikidata_label(f'{prefix}:{index}', endpoint_url, agent, lang)
+#     except Exception as e:
+#         logger.error(f'Exception in function "get_wikidata_label". URI: {uri}, lang: {lang}, error: {e}')
+#         return None
 
-
-
-def check_productivity_single(query: str, replace: dict, endpoint_url: str, agent: str='', cache=None)->bool:
-    """
-    Check if query is productive (i.e., returns non-empty results).
-    
-    :param query: SPARQL query
-    :type query: str
-    :param replace: must contain 'old' and 'new' keys for string replacement in the query
-    :type replace: dict
-    :param endpoint_url: SPARQL endpoint URL
-    :type endpoint_url: str
-    :param agent: User-Agent string for the request (default is empty string)
-    :type agent: str, optional
-    :param cache: Optional cache object to store and retrieve query results
-        cache must have methods `find_one` and `insert_one`
-    :type cache: object, optional
-    :return: True if the query returns non-empty results, False otherwise
-    :rtype: bool
-    """
-    sparql = query.replace(replace['old'], replace['new']).strip()
-    try:
-        result = sparql_results_to_list_of_dicts(execute(sparql, endpoint_url, agent, cache=cache))
-        return bool(result)
-    except Exception as e:
-        logger.error(f'Exception in function "check_productivity_single": {e}')
-        return False
-    
 
 def extract_q_number(entity: str) -> int:
     """

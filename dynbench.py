@@ -3,13 +3,14 @@
 
 DEBUG = False
 
-# import sys
 import traceback
 
 import requests
 import random
 import argparse
 from collections import defaultdict as ddict
+
+import bz2
 
 import threading
 
@@ -53,10 +54,6 @@ WIKIDATA_ENDPOINT = config('WIKIDATA_ENDPOINT')
 
 KEY = config('KEY')
 
-LLM_URL = 'http://demos.swe.htwk-leipzig.de:40139/v1/chat/completions'
-KEY = 'hgJ6WXSMpCu0nqYVhWzVq5BzrX0y5B'
-MODEL = 'gpt-4o'
-
 logger.info(f'Mongo host: {MONGO_HOST}')
 logger.info(f'Mongo user: {MONGO_USER}')
 logger.info(f'Wikidata endpoint: {WIKIDATA_ENDPOINT}')
@@ -92,7 +89,7 @@ logger.info(f'Cache contains {cache_collection.count_documents({})} records.')
 try:
     health_check_url = LLM_URL.replace('/api/generate', '').replace('/v1/chat/completions', '')
     r = requests.get(health_check_url)
-    logger.info(f'LLM status: {r.status_code}')
+    logger.info(f'LLM status (http code): {r.status_code}')
 except:
     logger.error('Error connecting LLM, exiting...')
     exit(1)
@@ -100,15 +97,15 @@ except:
     
 page_rank = {}
 
-wait_time(4.0, 'pagerank file load') # init timer to skip "Loaded 1 record" message
+wait_time(0.0, 'pagerank file load') # init timer to skip "Loaded 1 record" message
 logger.info('Loading PageRank file...')
 try:
-    with open('pagerank/2025-11-05.allwiki.links.rank', 'r') as f:
+    with open('pagerank/allwiki.rank', 'r') as f:
         for x, line in enumerate(f):
             entity, rank = line.split('\t')
-            page_rank[entity.strip()] = int(float(rank.strip())*100)
-            if wait_time(4.0, 'pagerank file load'):
-                logger.info(f'Loaded {x+1:,} records.'.replace(',', ' '))
+            page_rank[entity.strip()] = float(rank.strip())
+            if wait_time(1.0, 'pagerank file load'):
+                logger.info(f'Loaded {x+1:>10,} records.'.replace(',', ' '))
     logger.info('PageRank file loaded successfully')
 except Exception as e:
     logger.error(f'Error loading PageRank file in dynbench.py: {e}. Exiting...')
@@ -492,8 +489,10 @@ def build_pagerank_list(substitutes: list) -> list:
     for r in substitutes:
         old = r['old'].split(':')[-1]
         new = r['new'].split(':')[-1]
-        if old in page_rank and new in page_rank:
-            result.append((page_rank[old], page_rank[new], r))
+
+        old_rank = page_rank.get(old, 1.0)
+        new_rank = page_rank.get(new, 1.0)
+        result.append((old_rank, new_rank, r))
 
     return result
 
@@ -566,8 +565,8 @@ def get_info(query: str) -> dict:
     for sub in info['substitutes']:
         o = sub['old'].split(':')[-1]
         n = sub['new'].split(':')[-1]
-        sub['old pagerank'] = page_rank.get(o, None)
-        sub['new pagerank'] = page_rank.get(n, None)
+        sub['old pagerank'] = page_rank.get(o, 1.0)
+        sub['new pagerank'] = page_rank.get(n, 1.0)
 
     return info
 
@@ -664,10 +663,10 @@ def create_question_query(query: str, question: str, model: str, lang: str, comp
                 continue
 
             logger.info(f'Successfully created new question and query by replacing {old_label} -> {new_label}.')
-            logger.info(f'Original entity: {replace["old"]} ({old_label}),  PageRank: {old_pagerank/100}.')
-            logger.info(f'New entity: {replace["new"]} ({new_label}), PageRank: {new_pagerank/100}.')
+            logger.info(f'Original entity: {replace["old"]} ({old_label}),  PageRank: {old_pagerank}.')
+            logger.info(f'New entity: {replace["new"]} ({new_label}), PageRank: {new_pagerank}.')
 
-            return new_question, new_query, old_pagerank / 100, new_pagerank / 100
+            return new_question, new_query, old_pagerank, new_pagerank
         except KeyboardInterrupt:
             raise
         except Exception as e:

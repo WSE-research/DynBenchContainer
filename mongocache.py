@@ -1,35 +1,76 @@
+import threading
 from inspect import signature
 from functools import wraps
-from typing import Callable
+from typing import Callable, Any
+from enum import Enum
 
-from pymongo.collection import Collection
+
+class Policy(Enum):
+    RR   = 1
+    FIFO = 2
+    LIFO = 3
+    LRU  = 4
+    MRU  = 5
 
 
 class MongoCache:
-    def __init__(self, collection, max_size: int=1024):
-        assert isinstance(collection, Collection)
+    def __init__(self, collection, max_size: int=1024, policy=Policy.FIFO):
         assert isinstance(max_size, int)
-        assert max_size >= 0
+
         self.collection = collection
-        self.max_size = max_size
+        self.max_size = max(0, max_size)
+        self.policy = policy
+        self.lock = threading.Lock()
+
+        # enshure that collection is properly indexed
+        with self.lock:
+            collection.create_index('order', unique=True)
+
+    def get_min_order(self):
+        doc = self.collection.find_one({}, sort={ 'order': 1 })
+        return doc['order']  if doc and 'order' in doc else  1
+
+    def get_max_order(self):
+        doc = self.collection.find_one({}, sort={ 'order': -1 })
+        return doc['order']  if doc and 'order' in doc else  1
 
     def get(self, key: str):
-        return self.collection.find_one({ 'key': key })
+        with self.lock:
+            doc = self.collection.find_one({ 'key': key })
+            if doc:
+                order = self.get_max_order()
+                self.collection.update_one({ '_id': doc['_id'] }, { '$set': { 'order': order + 1 } })
+                return doc
+            else:
+                return None
 
-    def set(self, key: str, value):
-        if self.max_size and self.collection.count_documents({}) >= self.max_size:
-            self._remove_oldest()
-        self.collection.insert_one({ 'key': key, 'value': value })
+    def set(self, key: str, value, policy = None):
+        if not policy:
+            policy = self.policy
 
-    def delete(self, key: str):
-        self.collection.delete_one({ 'key': key })
+        with self.lock:
+            if self.max_size and self.collection.count_documents({}) >= self.max_size:
+                match policy:
+                    case Policy.RR:
+                        # there is always at least one document
+                        doc = next(self.collection.aggregate([ { '$sample': { 'size': 1 } } ]))
+                    case Policy.FIFO:
+                        doc = self.collection.find_one(sort=[('_id', 1)])
+                    case Policy.LIFO:
+                        doc = self.collection.find_one(sort=[('_id', -1)])
+                    case Policy.LRU:
+                        doc = self.collection.find_one(sort=[('order', 1)])
+                    case Policy.MRU:
+                        doc = self.collection.find_one(sort=[('order', -1)])
+                    case _:
+                        doc = None
 
-    def _remove_oldest(self):
-        doc = self.collection.find_one(sort=[('_id', 1)])
-        if doc:
-            self.collection.delete_one({ '_id': doc['_id'] })
+                if doc:
+                    self.collection.delete_one({ '_id': doc['_id'] })
 
-    def fifo_cache(self, using=None):
+            self.collection.insert_one({ 'key': key, 'order': self.get_max_order() + 1, 'value': value })
+
+    def cache(self, using=None, policy=None):
         def decorator(func: Callable):
             @wraps(func)
             def wrapper(*args, **kwargs):
@@ -48,7 +89,7 @@ class MongoCache:
                     return result['value']
                 
                 result = func(*args, **kwargs)
-                self.set(key, result)
+                self.set(key, result, policy)
                 
                 return result
 

@@ -22,15 +22,15 @@ from pymongo import MongoClient
 import logging
 from uvicorn.config import LOGGING_CONFIG
 
-from decouple import Config, RepositoryEnv
+# from decouple import Config, RepositoryEnv
+from decouple import config
 
 from nltk.tokenize import sent_tokenize
 
 from dynutils import execute as raw_execute
-from dynutils import get_wikidata_label, sparql_results_to_list_of_dicts
-from dynutils import parse_query, extract_entities
-from dynutils import extract_q_number, check_productivity_single
-from dynutils import get_levenshtein_distance
+from dynutils import sparql_results_to_list_of_dicts
+from dynutils import parse_query, extract_entities, extract_q_number
+from dynutils import get_levenshtein_distance, wait_time, uri2short, FIXED_LABELS, WIKIDATA_PREFIX
 
 from mongocache import MongoCache
 
@@ -40,7 +40,7 @@ logger = logging.getLogger('uvicorn.error')
 logging.basicConfig(level=logging.INFO)
 
 
-config = Config(RepositoryEnv('.env'))
+# config = Config(RepositoryEnv('.env'))
 
 MONGO_HOST = config('MONGO_HOST')
 MONGO_USER = config('MONGO_USER')
@@ -52,6 +52,10 @@ WIKIDATA_AGENT = config('WIKIDATA_AGENT')
 WIKIDATA_ENDPOINT = config('WIKIDATA_ENDPOINT')
 
 KEY = config('KEY')
+
+LLM_URL = 'http://demos.swe.htwk-leipzig.de:40139/v1/chat/completions'
+KEY = 'hgJ6WXSMpCu0nqYVhWzVq5BzrX0y5B'
+MODEL = 'gpt-4o'
 
 logger.info(f'Mongo host: {MONGO_HOST}')
 logger.info(f'Mongo user: {MONGO_USER}')
@@ -65,15 +69,29 @@ mongo = MongoClient(
     password=MONGO_PASS,
 )
 
-db = mongo['wikidata']
-cache_collection = db['cache']
+db = mongo.dynbench
+cache_collection = db.cache
+
+# make sure all documents have "order" field
+doc = cache_collection.find_one({ 'order': {"$exists": True} }, sort={ 'order': -1 })
+if doc:
+    order = doc['order']
+else:
+    order = 0
+
+for doc in cache_collection.find({ 'order': {"$exists": False} }, sort=[('_id', 1)]):
+    order += 1
+    cache_collection.update_one({ '_id': doc['_id'] }, { '$set': { 'order': order } })
+
 cache = MongoCache(cache_collection, 1024*1024)
+
 
 logger.info(f'Cache contains {cache_collection.count_documents({})} records.')
 
 
 try:
-    r = requests.get(LLM_URL.replace('/api/generate', ''), )
+    health_check_url = LLM_URL.replace('/api/generate', '').replace('/v1/chat/completions', '')
+    r = requests.get(health_check_url)
     logger.info(f'LLM status: {r.status_code}')
 except:
     logger.error('Error connecting LLM, exiting...')
@@ -82,13 +100,14 @@ except:
     
 page_rank = {}
 
+wait_time(4.0, 'pagerank file load') # init timer to skip "Loaded 1 record" message
 logger.info('Loading PageRank file...')
 try:
     with open('pagerank/2025-11-05.allwiki.links.rank', 'r') as f:
         for x, line in enumerate(f):
             entity, rank = line.split('\t')
             page_rank[entity.strip()] = int(float(rank.strip())*100)
-            if x and x % (11069*29*13) == 0:
+            if wait_time(4.0, 'pagerank file load'):
                 logger.info(f'Loaded {x+1:,} records.'.replace(',', ' '))
     logger.info('PageRank file loaded successfully')
 except Exception as e:
@@ -107,18 +126,88 @@ LANGUAGES = {
 PREDICATES = ('wdt:P31', 'wdt:P279', )
 
 
-@cache.fifo_cache(using={'query'})
+@cache.cache(using={'query'})
 def execute(query: str, delay=2.0, timeout=30.0,) -> dict | None:
-    return raw_execute(query, WIKIDATA_ENDPOINT, WIKIDATA_AGENT, cache=None)
+    return raw_execute(query, WIKIDATA_ENDPOINT, WIKIDATA_AGENT, delay=delay, timeout=timeout)
 
 
-def get_resources_types(info: dict, cache=None, predicates: list=[]) -> dict:
+# @cache.fifo_cache(using={'entity', 'lang'})
+# def get_label(entity: str, lang: str='en') -> str:
+#     get_wikidata_label(entity, WIKIDATA_ENDPOINT, WIKIDATA_AGENT, lang=lang)
+
+
+def query_wikidata_label(uri: str, endpoint_url, agent: str='', lang: str='en') -> str:
+    """
+    Query the Wikidata label for a given URI.
+    
+    :param uri: Wikidata resource URI
+    :type uri: str
+    :param endpoint_url: SPARQL endpoint URL
+    :type endpoint_url: str
+    :param agent: User-Agent string for the request
+    :type agent: str
+    :param lang: Language code for the label (default is 'en')
+    :type lang: str
+    :return: Label for the URI in the specified language, or None if not found
+    :rtype: str
+    """
+    if uri in FIXED_LABELS:
+        return FIXED_LABELS[uri]
+
+    query = (
+        'SELECT ?label WHERE {',
+            f"OPTIONAL {{ {uri} rdfs:label ?lang_label. FILTER(LANG(?lang_label) = '{lang}') }}",
+            f"OPTIONAL {{ {uri} rdfs:label ?default_label. FILTER(LANG(?default_label) = 'mul') }}",
+            f"OPTIONAL {{ {uri} owl:sameAs+ ?redirect . ?redirect rdfs:label ?redirect_label . FILTER(LANG(?redirect_label) = '{lang}') }}",
+            "BIND(COALESCE(?lang_label, ?default_label, ?redirect_label) AS ?label) . ",
+        '}',
+    )
+
+    try:
+        data = execute('\n'.join(query))
+        data = data['results']['bindings'][0]
+        data = data['label']['value']
+    except KeyboardInterrupt:
+        raise
+    except Exception as e:
+        logger.error(f'Exception in function "query_wikidata_label". URI: {uri}, lang: {lang}, error: {e}')
+        return None
+
+    return data
+
+
+def get_wikidata_label(uri: str, endpoint_url: str, agent: str='', lang: str='en', prefixes=WIKIDATA_PREFIX) -> str:
+    """
+    Get label for a given Wikidata URI.
+    uri: Wikidata resource URI
+    endpoint_url: SPARQL endpoint URL
+    :type endpoint_url: str
+    agent: User-Agent string for the request
+    :type agent: str
+    lang: language code for the label (default is 'en')
+    :type lang: str
+    return: label for the URI in the specified language, or None if not found
+    """
+    try:
+        uri = uri2short(uri, prefixes)
+        prefix = 'wd' # it works despite property or entity
+        index = uri.split(':')[-1]
+        return query_wikidata_label(f'{prefix}:{index}', endpoint_url, agent, lang)
+    except Exception as e:
+        logger.error(f'Exception in function "get_wikidata_label". URI: {uri}, lang: {lang}, error: {e}')
+        return None
+
+
+def get_label(entity: str, lang: str='en') -> str:
+    return get_wikidata_label(entity, WIKIDATA_ENDPOINT, WIKIDATA_AGENT, lang=lang)
+
+
+def get_resources_types(info: dict, predicates: list=[]) -> dict:
     """
     Collect properties of entities for the item by given predicates.
 
     Args:
         info (dict): Information about a benchmark's record.
-        cache (Collection, optional): MongoDB collection for caching.
         predicates (list): List of predicates to filter types.
     Returns:
         Dictionary with properties for each entity (predicates are ignored).
@@ -214,14 +303,13 @@ def get_query_conditions(info: dict) -> dict:
     return query_conditions
 
 
-def find_substitutes(query: str, info: dict, cache=None) -> list:
+def find_substitutes(query: str, info: dict) -> list:
     """
     Find possible substitutes for the each entity in the item.
 
     Args:
         query (str): SPARQL query.
         info (dict): Information about a benchmark's record.
-        cache (Collection, optional): MongoDB collection for caching.
     Returns:
         List of dictionaries with substitute information for each entity.
     Raises:
@@ -262,7 +350,31 @@ def find_substitutes(query: str, info: dict, cache=None) -> list:
     return substitutes
 
 
-@cache.fifo_cache(using={'model', 'prompt', 'temp', 'max_tokens'})
+def check_productivity_single(query: str, replace: dict, endpoint_url: str, agent: str='')->bool:
+    """
+    Check if query is productive (i.e., returns non-empty results).
+    
+    :param query: SPARQL query
+    :type query: str
+    :param replace: must contain 'old' and 'new' keys for string replacement in the query
+    :type replace: dict
+    :param endpoint_url: SPARQL endpoint URL
+    :type endpoint_url: str
+    :param agent: User-Agent string for the request (default is empty string)
+    :type agent: str, optional
+    :return: True if the query returns non-empty results, False otherwise
+    :rtype: bool
+    """
+    sparql = query.replace(replace['old'], replace['new']).strip()
+    try:
+        result = sparql_results_to_list_of_dicts(execute(sparql))
+        return bool(result)
+    except Exception as e:
+        logger.error(f'Exception in function "check_productivity_single": {e}')
+        return False
+
+
+@cache.cache(using={'model', 'prompt', 'temp', 'max_tokens'})
 def call_LLM(url: str, key: str, model: str, prompt, temp: float=0.0, max_tokens: int=1000, timeout=30.0) -> dict | None:
     """Call the openAI/Ollama API to generate a response based on the provided model and prompt.
     
@@ -286,7 +398,10 @@ def call_LLM(url: str, key: str, model: str, prompt, temp: float=0.0, max_tokens
         'options': {
             'temperature': temp,
             'num_predict': max_tokens,
-        }
+        },
+        'messages': [
+            { 'role': 'user', 'content': prompt }
+        ],
     }
 
     try:
@@ -296,7 +411,7 @@ def call_LLM(url: str, key: str, model: str, prompt, temp: float=0.0, max_tokens
             headers = { 'content-type': 'application/json', 'Authorization': f'Bearer {key}' },
             timeout=timeout
         )
-        if response.status_code == 200:
+        if response.status_code != 200:
             logger.error(f'Error call LLM: {response.text}')
         return response.json() if response.status_code == 200 else None
 
@@ -328,8 +443,8 @@ def replace_entity(model: str, question: str, query: str, entity: str, new_entit
     Returns:
         Tuple of (new_query, new_question) or (None, None) if replacement failed.
     """
-    old_label= get_wikidata_label(entity, WIKIDATA_ENDPOINT, WIKIDATA_AGENT, lang=lang, cache=cache)
-    new_label= get_wikidata_label(new_entity, WIKIDATA_ENDPOINT, WIKIDATA_AGENT, lang=lang, cache=cache)
+    old_label= get_label(entity, lang=lang)
+    new_label= get_label(new_entity, lang=lang)
 
     if not old_label or not new_label:
         return None, None
@@ -347,13 +462,17 @@ def replace_entity(model: str, question: str, query: str, entity: str, new_entit
 
     logger.debug('Calling LLM to replace entity in question...')
     new_question = call_LLM(LLM_URL, KEY, model, prompt, temp=0.0, timeout=600)
+    try:
+        new_question = new_question['response']
+    except:
+        pass
     logger.debug('LLM call completed.')
 
     if not new_question:
         logger.error(f'Replace {old_label} -> {new_label} failed.')
         return None, None
     
-    return new_query, new_question['response']
+    return new_query, new_question
 
 
 def build_pagerank_list(substitutes: list) -> list:
@@ -390,7 +509,7 @@ def count_sentences(s: str) -> int:
     return len(n)
 
 
-def get_info(query: str, cache=None) -> dict:
+def get_info(query: str) -> dict:
     """Get the information about the query.
         Triples: list of triples in the query.
         Resources: list of entities and predicates in the query.
@@ -401,7 +520,6 @@ def get_info(query: str, cache=None) -> dict:
 
     Args:
         query: SPARQL query string.
-        cache: Optional cache database.
     Returns:
         Dictionary with information about the query.
     """
@@ -414,7 +532,7 @@ def get_info(query: str, cache=None) -> dict:
     num_resources = len(info['resources'])
     logger.debug(f'Extracted {num_resources} resource{"s" if num_resources != 1 else ""} from the query.')
 
-    info['types'] = get_resources_types(info, cache, PREDICATES)
+    info['types'] = get_resources_types(info, PREDICATES)
     logger.debug(f'Extracted entity properties.')
 
     info['conditions'] = get_conditions_by_predicates(info, PREDICATES)
@@ -423,7 +541,7 @@ def get_info(query: str, cache=None) -> dict:
     info['query conditions'] = get_query_conditions(info)
     logger.debug(f'Extracted query conditions.')
 
-    info['substitutes'] = find_substitutes(query, info, cache=cache)
+    info['substitutes'] = find_substitutes(query, info)
     logger.debug(f'Extracted substitutes for entities.')
 
     all_replaces = []
@@ -436,7 +554,7 @@ def get_info(query: str, cache=None) -> dict:
     for u in unic_replaces:
         u['new'] = u.pop('subst')
 
-    # 
+    # find language for each replace
     for r in unic_replaces:
         for a in all_replaces:
             if a['old'] == r['old'] and a['subst'] == r['new']:
@@ -480,7 +598,7 @@ def sort_replaces_by_complexity(replaces, complexity):
         raise ValueError(f'Complexity can only be easy/normal/hard/random. Got: {complexity}')
 
 
-def create_question_query(query: str, question: str, model: str, lang: str, complexity: str, cache=None):
+def create_question_query(query: str, question: str, model: str, lang: str, complexity: str):
     """Create a new question and query by replacing one entity.
 
     Args:
@@ -489,7 +607,6 @@ def create_question_query(query: str, question: str, model: str, lang: str, comp
         model: Name of LLM model to use.
         lang: Language of the question ('en', 'de', 'fr', 'ru', 'uk').
         complexity: Complexity level ('easy', 'normal', 'hard', 'random').
-        cache: MongoDB-like cache database. Must support find_one and insert_one methods.
     Returns:
         Tuple of (new_question, new_query) or (None, None) if no valid replacement found.
     Raises:
@@ -497,7 +614,7 @@ def create_question_query(query: str, question: str, model: str, lang: str, comp
     """
     logger.info(f'Transforming question: "{question}"...')
 
-    info = get_info(query, cache)
+    info = get_info(query)
 
     replaces = build_pagerank_list(info['substitutes'])
     replaces = sort_replaces_by_complexity(replaces, complexity)
@@ -505,14 +622,17 @@ def create_question_query(query: str, question: str, model: str, lang: str, comp
     for replace in replaces:
         old_pagerank, new_pagerank, replace = replace
 
-        old_label = get_wikidata_label(replace['old'], WIKIDATA_ENDPOINT, WIKIDATA_AGENT, lang=lang, cache=cache)
+        old_label = get_label(replace['old'], lang=lang)
+        logger.info(f"Label for {replace['old']}: {old_label}")
         if not old_label:
-            return None, None, None, None
-        new_label = get_wikidata_label(replace['new'], WIKIDATA_ENDPOINT, WIKIDATA_AGENT, lang=lang, cache=cache)
+            continue
+
+        new_label = get_label(replace['new'], lang=lang)
+        logger.info(f"Label for {replace['new']}: {new_label}")
         if not new_label:
             continue
 
-        if not check_productivity_single(query, replace, WIKIDATA_ENDPOINT, WIKIDATA_AGENT, cache=cache):
+        if not check_productivity_single(query, replace, WIKIDATA_ENDPOINT, WIKIDATA_AGENT):
             continue
 
         new_question = None
@@ -586,7 +706,7 @@ def main():
     lang = args.lang
     model = args.model
 
-    new_question, new_query, old_pagerank, new_pagerank = create_question_query(query, question, model, lang, complexity, cache)
+    new_question, new_query, old_pagerank, new_pagerank = create_question_query(query, question, model, lang, complexity)
 
     logger.info(f'Original Question: {question}')
     logger.info(f'Original Query: {query}')
@@ -649,8 +769,7 @@ def transform_endpoint(request: TransformRequest) -> TransformResponse:
             request.question,
             request.model,
             request.lang,
-            request.complexity,
-            cache
+            request.complexity
         )
         
         return TransformResponse(
@@ -690,8 +809,7 @@ if DEBUG:
         'Which country does the famous Easter island belong to?',
         'Gemma3:27b',
         'en', 
-        'normal',
-        cache,
+        'normal'
     )
 else:
     if __name__ == "__main__":

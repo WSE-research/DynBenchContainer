@@ -1,6 +1,10 @@
+import json
+
 import threading
-from inspect import signature
+
 from functools import wraps
+from inspect import signature
+
 from typing import Callable, Any
 from enum import Enum
 
@@ -11,6 +15,10 @@ class Policy(Enum):
     LIFO = 3
     LRU  = 4
     MRU  = 5
+
+
+def _format(value):
+    return json.dumps(value)
 
 
 class MongoCache:
@@ -80,8 +88,8 @@ class MongoCache:
                 
                 key = []
                 for name, value in bound_args.arguments.items():
-                    if not using or name in using:
-                        key.append(f'{name}={value}')
+                    if (not using) or (name in using):
+                        key.append(f'{name}={_format(value)}')
                 key = f"{func.__name__}({', '.join(key)})"
 
                 result = self.get(key)

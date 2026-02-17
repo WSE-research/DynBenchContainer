@@ -105,7 +105,7 @@ try:
             entity, rank = line.split('\t')
             page_rank[entity.strip()] = float(rank.strip())
             if wait_time(1.0, 'pagerank file load'):
-                logger.info(f'Loaded {x+1:>10,} records.'.replace(',', ' '))
+                logger.info(f'Loaded {x+1:,} records.'.replace(',', ' '))
     logger.info('PageRank file loaded successfully')
 except Exception as e:
     logger.error(f'Error loading PageRank file in dynbench.py: {e}. Exiting...')
@@ -597,7 +597,7 @@ def sort_replaces_by_complexity(replaces, complexity):
         raise ValueError(f'Complexity can only be easy/normal/hard/random. Got: {complexity}')
 
 
-def create_question_query(query: str, question: str, model: str, lang: str, complexity: str):
+def create_question_query(query: str, question: str, model: str, lang: str, complexity: str, checks=None):
     """Create a new question and query by replacing one entity.
 
     Args:
@@ -606,12 +606,24 @@ def create_question_query(query: str, question: str, model: str, lang: str, comp
         model: Name of LLM model to use.
         lang: Language of the question ('en', 'de', 'fr', 'ru', 'uk').
         complexity: Complexity level ('easy', 'normal', 'hard', 'random').
+        checks: checks to perform or None. If None, both checks are performed. Possible items:
+            - sentence: check if number of sentences is same
+            - levenstein: check original question vs back-transformed by Levenstein distance.
+            
     Returns:
         Tuple of (new_question, new_query) or (None, None) if no valid replacement found.
     Raises:
         Exception: If an error occurs during processing.
     """
     logger.info(f'Transforming question: "{question}"...')
+
+    if checks is None:
+        checks = {}
+    elif isinstance(checks, (tuple, list)):
+        checks = set(checks)
+    elif not isinstance(checks, set):
+        logger.error('Value error in create_question_query: checks must be of type tuple, list, set or None')
+        return None, None, None, None
 
     info = get_info(query)
 
@@ -650,15 +662,19 @@ def create_question_query(query: str, question: str, model: str, lang: str, comp
             old_len = count_sentences(question)
             new_len = count_sentences(new_question)
 
-            if new_len != old_len:
+            logger.info(f'New question: {new_question}')
+
+            if checks and 'sentence' in checks and new_len != old_len:
                 logger.info(f'Sentence count check failed (changed from {old_len} to {new_len}). Skipping replacement.')
                 continue
 
             logger.info(f'Back-transform {new_label} -> {old_label}.')
             _, restored_question = replace_entity(model, new_question, new_query, replace['new'], replace['old'], lang)
             restored_question = restored_question.strip(' ,\n\t')
+            logger.info(f'Back-transformed question: {restored_question}')
+
             dist =  get_levenshtein_distance(question, restored_question)
-            if dist > 4:
+            if checks and 'levenstein' in checks and dist > 4:
                 logger.info(f'Back-transform failed (Levenshtein distance: {dist}). Skipping replacement.')
                 continue
 
@@ -705,7 +721,7 @@ def main():
     lang = args.lang
     model = args.model
 
-    new_question, new_query, old_pagerank, new_pagerank = create_question_query(query, question, model, lang, complexity)
+    new_question, new_query, old_pagerank, new_pagerank = create_question_query(query, question, model, lang, complexity, None)
 
     logger.info(f'Original Question: {question}')
     logger.info(f'Original Query: {query}')
@@ -724,6 +740,7 @@ class TransformRequest(BaseModel):
     model: str
     lang: str
     complexity: str = "normal"
+    checks: list[str] | None
 
 
 class TransformResponse(BaseModel):
@@ -768,7 +785,8 @@ def transform_endpoint(request: TransformRequest) -> TransformResponse:
             request.question,
             request.model,
             request.lang,
-            request.complexity
+            request.complexity,
+            request.checks
         )
         
         return TransformResponse(
@@ -808,7 +826,8 @@ if DEBUG:
         'Which country does the famous Easter island belong to?',
         'Gemma3:27b',
         'en', 
-        'normal'
+        'normal',
+        None
     )
 else:
     if __name__ == "__main__":

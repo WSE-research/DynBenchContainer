@@ -68,6 +68,7 @@ mongo = MongoClient(
 
 db = mongo.dynbench
 cache_collection = db.cache
+feedback_collection = db.feedback
 
 # make sure all documents have "order" field
 doc = cache_collection.find_one({ 'order': {"$exists": True} }, sort={ 'order': -1 })
@@ -752,6 +753,12 @@ class TransformResponse(BaseModel):
     new_pagerank: float | None
 
 
+class FeedbackRequest(BaseModel):
+    inputs: list[str]
+    outputs: list[str]
+    rating: int
+
+
 # lock to prevent multply calls
 transform_lock = threading.Lock()
 
@@ -805,6 +812,26 @@ def transform_endpoint(request: TransformRequest) -> TransformResponse:
     finally:
         # Always release the lock so the endpoint becomes available again
         transform_lock.release()
+
+
+@app.post("/feedback")
+async def submit_feedback(feedback: FeedbackRequest):
+    try:
+        feedback_doc = {
+            "inputs": feedback.inputs,
+            "outputs": feedback.outputs,
+            "rating": feedback.rating,
+        }
+
+        result = await feedback_collection.insert_one(feedback_doc)
+
+        return {
+            "message": "Feedback stored successfully",
+            "feedback_id": str(result.inserted_id)
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/")

@@ -10,8 +10,6 @@ import random
 import argparse
 from collections import defaultdict as ddict
 
-import bz2
-
 import threading
 
 from fastapi import FastAPI, HTTPException
@@ -23,25 +21,30 @@ from pymongo import MongoClient
 import logging
 from uvicorn.config import LOGGING_CONFIG
 
-# from decouple import Config, RepositoryEnv
 from decouple import config
 
-from nltk.tokenize import sent_tokenize
+from utils.timer import wait_time
+from utils.mongocache import MongoCache
 
-from dynutils import execute as raw_execute
-from dynutils import sparql_results_to_list_of_dicts
-from dynutils import parse_query, extract_entities, extract_q_number
-from dynutils import get_levenshtein_distance, wait_time, uri2short, FIXED_LABELS, WIKIDATA_PREFIX
+from utils.sparql import execute as raw_execute
+from utils.sparql import normal_sparql, parse_query, extract_entities
 
-from mongocache import MongoCache
+from utils.wikidata import get_wikidata_label, WIKIDATA_PREFIX
+from utils.wikidata import get_resources_types, find_substitutes
+from utils.wikidata import check_productivity_single
+
+from utils.text import count_sentences, calc_levenshtein_dist
+
+from utils.llm import call_LLM as raw_call_LLM
 
 
 logging.config.dictConfig(LOGGING_CONFIG)
 logger = logging.getLogger('uvicorn.error')
-logging.basicConfig(level=logging.INFO)
+if DEBUG:
+    logging.basicConfig(level=logging.DEBUG)
+else:
+    logging.basicConfig(level=logging.INFO)
 
-
-# config = Config(RepositoryEnv('.env'))
 
 MONGO_HOST = config('MONGO_HOST')
 MONGO_USER = config('MONGO_USER')
@@ -96,6 +99,7 @@ except:
     exit(1)
     
     
+# Load PageRank file into memory
 page_rank = {}
 
 wait_time(0.0, 'pagerank file load') # init timer to skip "Loaded 1 record" message
@@ -112,14 +116,33 @@ except Exception as e:
     logger.error(f'Error loading PageRank file in dynbench.py: {e}. Exiting...')
     exit(1)
 
-
+# Top 20 languages by number of speakers in Europe
 LANGUAGES = {
-    'en': 'English',
-    'de': 'German',
-    'fr': 'French',
-    'ru': 'Russian',
-    'uk': 'Ukrainian',
+    'English':    'en',
+    'German':     'de',
+    'French':     'fr',
+    'Russian':    'ru',
+    'Ukrainian':  'uk',
+    'Italian':    'it',
+    'Spanish':    'es',
+    'Polish':     'pl',
+    'Romanian':   'ro',
+    'Dutch':      'nl',
+    'Turkish':    'tr',
+    'Bavarian':   'bar',
+    'Portuguese': 'pt',
+    'Hungarian':  'hu',
+    'Greek':      'el',
+    'Czech':      'cs',
+    'Swedish':    'sv',
+    'Catalan':    'ca',
+    'Serbian':    'sr',
+    'Bulgarian':  'bg',
 }
+
+# Add reverse order
+for k, v in list(LANGUAGES.items()):
+    LANGUAGES[v] = k
 
 PREDICATES = ('wdt:P31', 'wdt:P279', )
 
@@ -129,116 +152,8 @@ def execute(query: str, delay=2.0, timeout=30.0,) -> dict | None:
     return raw_execute(query, WIKIDATA_ENDPOINT, WIKIDATA_AGENT, delay=delay, timeout=timeout)
 
 
-# @cache.fifo_cache(using={'entity', 'lang'})
-# def get_label(entity: str, lang: str='en') -> str:
-#     get_wikidata_label(entity, WIKIDATA_ENDPOINT, WIKIDATA_AGENT, lang=lang)
-
-
-def query_wikidata_label(uri: str, endpoint_url, agent: str='', lang: str='en') -> str:
-    """
-    Query the Wikidata label for a given URI.
-    
-    :param uri: Wikidata resource URI
-    :type uri: str
-    :param endpoint_url: SPARQL endpoint URL
-    :type endpoint_url: str
-    :param agent: User-Agent string for the request
-    :type agent: str
-    :param lang: Language code for the label (default is 'en')
-    :type lang: str
-    :return: Label for the URI in the specified language, or None if not found
-    :rtype: str
-    """
-    if uri in FIXED_LABELS:
-        return FIXED_LABELS[uri]
-
-    query = (
-        'SELECT ?label WHERE {',
-            f"OPTIONAL {{ {uri} rdfs:label ?lang_label. FILTER(LANG(?lang_label) = '{lang}') }}",
-            f"OPTIONAL {{ {uri} rdfs:label ?default_label. FILTER(LANG(?default_label) = 'mul') }}",
-            f"OPTIONAL {{ {uri} owl:sameAs+ ?redirect . ?redirect rdfs:label ?redirect_label . FILTER(LANG(?redirect_label) = '{lang}') }}",
-            "BIND(COALESCE(?lang_label, ?default_label, ?redirect_label) AS ?label) . ",
-        '}',
-    )
-
-    try:
-        data = execute('\n'.join(query))
-        data = data['results']['bindings'][0]
-        data = data['label']['value']
-    except KeyboardInterrupt:
-        raise
-    except Exception as e:
-        logger.error(f'Exception in function "query_wikidata_label". URI: {uri}, lang: {lang}, error: {e}')
-        return None
-
-    return data
-
-
-def get_wikidata_label(uri: str, endpoint_url: str, agent: str='', lang: str='en', prefixes=WIKIDATA_PREFIX) -> str:
-    """
-    Get label for a given Wikidata URI.
-    uri: Wikidata resource URI
-    endpoint_url: SPARQL endpoint URL
-    :type endpoint_url: str
-    agent: User-Agent string for the request
-    :type agent: str
-    lang: language code for the label (default is 'en')
-    :type lang: str
-    return: label for the URI in the specified language, or None if not found
-    """
-    try:
-        uri = uri2short(uri, prefixes)
-        prefix = 'wd' # it works despite property or entity
-        index = uri.split(':')[-1]
-        return query_wikidata_label(f'{prefix}:{index}', endpoint_url, agent, lang)
-    except Exception as e:
-        logger.error(f'Exception in function "get_wikidata_label". URI: {uri}, lang: {lang}, error: {e}')
-        return None
-
-
 def get_label(entity: str, lang: str='en') -> str:
-    return get_wikidata_label(entity, WIKIDATA_ENDPOINT, WIKIDATA_AGENT, lang=lang)
-
-
-def get_resources_types(info: dict, predicates: list=[]) -> dict:
-    """
-    Collect properties of entities for the item by given predicates.
-
-    Args:
-        info (dict): Information about a benchmark's record.
-        predicates (list): List of predicates to filter types.
-    Returns:
-        Dictionary with properties for each entity (predicates are ignored).
-    Raises:
-        KeyboardInterrupt: If the operation is interrupted by the user.
-    """
-    results = {}
-
-    if not predicates:
-        return results
-
-    for entity in info['resources']:
-        if not entity.startswith('wd:'):
-            continue
-
-        query = 'SELECT DISTINCT ?p ?o WHERE { VALUES ?p { ' + ' '.join(predicates) + ' } ' + entity + ' ?p ?o }'
-
-        try:
-            r = execute(query)
-            r = sparql_results_to_list_of_dicts(r)
-            r = {p: [v['o'] for v in r if v['p'] == p] for p in predicates}
-            for i in predicates:
-                r[i].sort(key=extract_q_number)
-
-            logger.debug(f'Collected properties for entity {entity}.')
-        except KeyboardInterrupt:
-            raise
-        except Exception as e:
-            logger.error(f'Exception {e} in function get_resources_types for entity {entity}.')
-
-        results[entity] = r
-        
-    return results
+    return get_wikidata_label(entity, execute, lang=lang)
 
 
 def get_conditions_by_predicates(info: dict, predicates: list=[]) -> dict:
@@ -301,130 +216,9 @@ def get_query_conditions(info: dict) -> dict:
     return query_conditions
 
 
-def find_substitutes(query: str, info: dict) -> list:
-    """
-    Find possible substitutes for the each entity in the item.
-
-    Args:
-        query (str): SPARQL query.
-        info (dict): Information about a benchmark's record.
-    Returns:
-        List of dictionaries with substitute information for each entity.
-    Raises:
-        KeyboardInterrupt: If the operation is interrupted by the user.
-    """
-    entities = [i for i in info['resources'] if i.startswith('wd:')]
-    substitutes = []
-
-    for entity in entities:
-        entity_conditions = info['conditions'][entity]['wdt:P31'] + info['conditions'][entity]['wdt:P279']
-        props = info['query conditions'][entity] + entity_conditions[:2]
-
-        extract_query = (
-            'SELECT DISTINCT ?subst ?label (lang(?label) as ?lang) WHERE {',
-            *(f'{    i} .' for i in props),
-            '    ?subst rdfs:label ?label .',
-            '    FILTER (lang(?label) IN ("en", "de", "fr", "ru", "uk"))',
-            f'    FILTER(?subst != {entity})',
-            '} LIMIT 1000',
-        )
-        extract_query = '\n'.join(extract_query)
-
-        try:
-            result = execute(extract_query)
-            result = sparql_results_to_list_of_dicts(result)
-
-            logger.info(f'Found {len(result)} potential substitutes for entity {entity}.')
-
-            for r in result:
-                r['old'] = entity
-            substitutes.append({ 'query': query, 'entity': entity, 'extract': extract_query, 'results': result })
-        except KeyboardInterrupt:
-            raise
-        except Exception as e:
-            logger.error(f'Exception in function find_substitutes: {e}')
-            continue
-
-    return substitutes
-
-
-def check_productivity_single(query: str, replace: dict, endpoint_url: str, agent: str='')->bool:
-    """
-    Check if query is productive (i.e., returns non-empty results).
-    
-    :param query: SPARQL query
-    :type query: str
-    :param replace: must contain 'old' and 'new' keys for string replacement in the query
-    :type replace: dict
-    :param endpoint_url: SPARQL endpoint URL
-    :type endpoint_url: str
-    :param agent: User-Agent string for the request (default is empty string)
-    :type agent: str, optional
-    :return: True if the query returns non-empty results, False otherwise
-    :rtype: bool
-    """
-    sparql = query.replace(replace['old'], replace['new']).strip()
-    try:
-        result = sparql_results_to_list_of_dicts(execute(sparql))
-        return bool(result)
-    except Exception as e:
-        logger.error(f'Exception in function "check_productivity_single": {e}')
-        return False
-
-
 @cache.cache(using={'model', 'prompt', 'temp', 'max_tokens'})
 def call_LLM(url: str, key: str, model: str, prompt, temp: float=0.0, max_tokens: int=1000, timeout=30.0) -> dict | None:
-    """Call the openAI/Ollama API to generate a response based on the provided model and prompt.
-    
-    Args:
-        url (str): The API endpoint URL.
-        key (str): The API key for authentication.
-        model (str): The model to use for generation.
-        prompt (str): The input prompt for the model.
-        temp (float, optional): The temperature for generation. Defaults to 0.0.
-        max_tokens (int, optional): The maximum number of tokens to generate. Defaults to 1000.
-        timeout (float, optional): The timeout for the API request in seconds. Defaults to 30.0.
-    Returns:
-        dict | None: The JSON response from the API if successful, otherwise None.
-    Raises:
-        KeyboardInterrupt: If the operation is interrupted by the user
-    """
-    data = {
-        'model': model,
-        'prompt': prompt,
-        'stream': False,
-        'options': {
-            'temperature': temp,
-            'num_predict': max_tokens,
-        },
-        'messages': [
-            { 'role': 'user', 'content': prompt }
-        ],
-    }
-
-    try:
-        response = requests.post(
-            url, 
-            json=data, 
-            headers = { 'content-type': 'application/json', 'Authorization': f'Bearer {key}' },
-            timeout=timeout
-        )
-        if response.status_code != 200:
-            logger.error(f'Error call LLM: {response.text}')
-        return response.json() if response.status_code == 200 else None
-
-    except requests.exceptions.Timeout:
-        logger.error(f'Timeout error while executing prompt')
-    except requests.exceptions.ConnectionError:
-        logger.error(f'Connection error while executing prompt')
-    except requests.exceptions.RequestException as e:
-        logger.error(f'Request exception in function "call_LLM": {e}')
-    except KeyboardInterrupt:
-        raise
-    except Exception as e:
-        logger.error(f'Exception in function "call_LLM": {e}')
-
-    return None
+    return raw_call_LLM(url, key, model, prompt, temp, max_tokens, timeout)
 
 
 def replace_entity(model: str, question: str, query: str, entity: str, new_entity: str, lang: str='en') -> tuple[str | None, str | None]:
@@ -498,17 +292,6 @@ def build_pagerank_list(substitutes: list) -> list:
     return result
 
 
-def count_sentences(s: str) -> int:
-    """Count the number of sentences in the string.
-    Args:
-        s: Input string.
-    Returns:
-        Number of sentences in the string.
-    """
-    n = sent_tokenize(s)
-    return len(n)
-
-
 def get_info(query: str) -> dict:
     """Get the information about the query.
         Triples: list of triples in the query.
@@ -532,7 +315,7 @@ def get_info(query: str) -> dict:
     num_resources = len(info['resources'])
     logger.debug(f'Extracted {num_resources} resource{"s" if num_resources != 1 else ""} from the query.')
 
-    info['types'] = get_resources_types(info, PREDICATES)
+    info['types'] = get_resources_types(info, execute, PREDICATES)
     logger.debug(f'Extracted entity properties.')
 
     info['conditions'] = get_conditions_by_predicates(info, PREDICATES)
@@ -541,7 +324,7 @@ def get_info(query: str) -> dict:
     info['query conditions'] = get_query_conditions(info)
     logger.debug(f'Extracted query conditions.')
 
-    info['substitutes'] = find_substitutes(query, info)
+    info['substitutes'] = find_substitutes(query, execute, info)
     logger.debug(f'Extracted substitutes for entities.')
 
     all_replaces = []
@@ -610,7 +393,6 @@ def create_question_query(query: str, question: str, model: str, lang: str, comp
         checks: checks to perform or None. If None, both checks are performed. Possible items:
             - sentence: check if number of sentences is same
             - levenstein: check original question vs back-transformed by Levenstein distance.
-            
     Returns:
         Tuple of (new_question, new_query) or (None, None) if no valid replacement found.
     Raises:
@@ -626,6 +408,7 @@ def create_question_query(query: str, question: str, model: str, lang: str, comp
         logger.error('Value error in create_question_query: checks must be of type tuple, list, set or None')
         return None, None, None, None
 
+    query = normal_sparql(query, WIKIDATA_PREFIX)
     info = get_info(query)
 
     replaces = build_pagerank_list(info['substitutes'])
@@ -644,15 +427,20 @@ def create_question_query(query: str, question: str, model: str, lang: str, comp
         if not new_label:
             continue
 
-        if not check_productivity_single(query, replace, WIKIDATA_ENDPOINT, WIKIDATA_AGENT):
+        if not check_productivity_single(query, execute, replace):
             continue
 
         new_question = None
         new_query = None
+        num_tries = 0
 
         try:
+            num_tries += 1
             # !TODO if label of item is different from used in the question then all back-transforms are failing
             #       set a max number of repeats for one entity
+            if num_tries > 6:
+                return None, None, None, None
+
             logger.info(f'Replace {old_label} -> {new_label}.')
             new_query, new_question = replace_entity(model, question, query, replace['old'], replace['new'], lang)
             if not new_question or not new_query:
@@ -674,7 +462,7 @@ def create_question_query(query: str, question: str, model: str, lang: str, comp
             restored_question = restored_question.strip(' ,\n\t')
             logger.info(f'Back-transformed question: {restored_question}')
 
-            dist =  get_levenshtein_distance(question, restored_question)
+            dist = calc_levenshtein_dist(question, restored_question)
             if checks and 'levenstein' in checks and dist > 4:
                 logger.info(f'Back-transform failed (Levenshtein distance: {dist}). Skipping replacement.')
                 continue
@@ -704,7 +492,7 @@ def main():
     parser.add_argument(
         '-l', '--lang', 
         type=str, 
-        choices=['en', 'de', 'fr', 'ru', 'uk'],
+        choices=[v for v in LANGUAGES.values() if len(v) < 4],
         help='Language of the question')
     parser.add_argument(
         '-c', '--complexity',

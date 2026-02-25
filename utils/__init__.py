@@ -6,7 +6,6 @@ from . import timer
 from . import sparql
 from . import mongocache
 from . import wikidata
-# from . import cache
-# from . import text
+from . import text
 
-__all__ = ['timer', 'sparql', 'mongocache', 'wikidata',] # 'cache', 'text']
+__all__ = ['timer', 'sparql', 'mongocache', 'wikidata', 'text']

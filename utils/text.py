@@ -19,10 +19,8 @@ def extract_number(entity: str) -> int:
     if entity.startswith('wd:Q'):
         try:
             return int(re.match('.*?([0-9]+)$', entity).group(1) or 0)
-            # return int(entity.split(':Q')[-1])
-        except ValueError:
-            logger.error(f'Exception in function "extract_number": ValueError: {entity}')
-            return 0
+        except:
+            logger.error(f'Exception in function "extract_number", entity {entity}')
     return 0
 
 
@@ -52,5 +50,9 @@ def count_sentences(s: str) -> int:
     Returns:
         Number of sentences in the string.
     """
-    n = sent_tokenize(s)
-    return len(n)
+    try:
+        n = sent_tokenize(s)
+        return len(n)
+    except Exception as e:
+        logger.error(f'Exception in function "count_sentences": {e}')
+        return 0

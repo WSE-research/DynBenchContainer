@@ -22,18 +22,31 @@ def call_LLM(url: str, key: str, model: str, prompt, temp: float=0.0, max_tokens
     Raises:
         KeyboardInterrupt: If the operation is interrupted by the user
     """
-    data = {
-        'model': model,
-        'prompt': prompt,
-        'stream': False,
-        'options': {
+    # Detect API type based on URL
+    is_ollama = 'generate' in url.lower()
+    
+    if is_ollama:
+        # Ollama API format
+        data = {
+            'model': model,
+            'prompt': prompt,
+            'stream': False,
+            'options': {
+                'temperature': temp,
+                'num_predict': max_tokens,
+            },
+        }
+    else:
+        # OpenAI-compatible API format
+        data = {
+            'model': model,
+            'messages': [
+                { 'role': 'user', 'content': prompt }
+            ],
             'temperature': temp,
-            'num_predict': max_tokens,
-        },
-        'messages': [
-            { 'role': 'user', 'content': prompt }
-        ],
-    }
+            'max_tokens': max_tokens,
+            'stream': False,
+        }
 
     try:
         response = requests.post(
@@ -44,7 +57,8 @@ def call_LLM(url: str, key: str, model: str, prompt, temp: float=0.0, max_tokens
         )
         if response.status_code != 200:
             logger.error(f'Error call LLM: {response.text}')
-        return response.json() if response.status_code == 200 else None
+            return None
+        return response.json()
 
     except requests.exceptions.Timeout:
         logger.error(f'Timeout error while executing prompt')

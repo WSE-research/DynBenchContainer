@@ -217,24 +217,21 @@ def find_substitutes(query: str, execute: Callable, info: dict) -> list:
     return substitutes
 
 
-def check_productivity_single(query: str, execute: Callable, replace: dict)->bool:
+def check_productivity_single(query: str, execute: Callable, replace: dict, prefixes: dict = WIKIDATA_PREFIX) -> bool:
     """
     Check if query is productive (i.e., returns non-empty results).
     
-    :param query: SPARQL query
-    :type query: str
-    :param replace: must contain 'old' and 'new' keys for string replacement in the query
-    :type replace: dict
-    :param endpoint_url: SPARQL endpoint URL
-    :type endpoint_url: str
-    :param agent: User-Agent string for the request (default is empty string)
-    :type agent: str, optional
-    :return: True if the query returns non-empty results, False otherwise
-    :rtype: bool
+    Args:
+        query: SPARQL query
+        execute: Function to execute SPARQL queries
+        replace: Dictionary containing 'old' and 'new' keys for string replacement in the query
+        prefixes: Dictionary of prefixes for SPARQL queries (default is WIKIDATA_PREFIX)
+    Returns:
+        True if the query returns non-empty results, False otherwise
     """
-    sparql = query.replace(replace['old'], replace['new']).strip()
+    sparql = query.replace(replace.get('old', ''), replace.get('new', '')).strip()
     try:
-        result = sparql_results_to_list_of_dicts(execute(sparql), WIKIDATA_PREFIX)
+        result = sparql_results_to_list_of_dicts(execute(sparql), prefixes)
         return bool(result)
     except Exception as e:
         logger.error(f'Exception in function "check_productivity_single": {e}')

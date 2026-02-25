@@ -187,7 +187,6 @@ def normal_sparql(query: str, prefixes: dict=None) -> str:
     return query
 
 
-
 def resolve_item(query_entry, mod=None)->str:
     """
     Resolve the parsed query entry to a string representation.

@@ -43,7 +43,7 @@ A sample `.env` file is provided in the root directory. Copy it to `.env` and fi
 
 == Setup
 
-DynBench uses the PageRank of Wikidata URIs (provided on the https://danker.s3.amazonaws.com/index.html page) and the NLTK library. To download the required resources, run setup.py before using the tool. Note that the PageRank file is 726 MB in size.
+DynBench uses the PageRank of Wikidata URIs (provided on the https://danker.s3.amazonaws.com/index.html page) and the NLTK library. The PageRank file is 19 MB in size.
 
 == Usage
 

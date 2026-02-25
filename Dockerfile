@@ -17,8 +17,17 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Download NLTK punkt modules
 RUN python -m nltk.downloader punkt punkt_tab
 
+# Copy utils
+COPY utils/ /app/utils/
+
+# Copy tests
+COPY tests/ /app/tests/
+
 # Copy the rest of the application
-COPY dynbench.py dynutils.py mongocache.py __init__.py .env /app/
+COPY dynbench.py __init__.py .env /app/
+
+# Run tests and fail build if any test fails
+RUN python -m pytest tests/ --tb=short || exit 1
 
 # Expose FastAPI port
 EXPOSE 8000

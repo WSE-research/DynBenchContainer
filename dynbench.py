@@ -11,6 +11,7 @@ logger = logging.getLogger()
 logger.parent = uvicorn_error
 logger.setLevel(logging.DEBUG) if DEBUG else logger.setLevel(level=logging.INFO)
 
+
 import traceback
 
 import requests
@@ -461,28 +462,30 @@ def create_question_query(query: str, question: str, model: str, lang: str, comp
             logger.info(f'Replace {old_label} -> {new_label}.')
             new_query, new_question = replace_entity(model, question, query, replace['old'], replace['new'], lang)
             if not new_question or not new_query:
+                logger.info(f'Cannot generate forward transformation.')
                 continue
 
             new_question = new_question.strip(' ,\n\t')
 
-            old_len = count_sentences(question)
-            new_len = count_sentences(new_question)
-
             logger.info(f'New question: {new_question}')
 
-            if checks and 'sentence' in checks and new_len != old_len:
-                logger.info(f'Sentence count check failed (changed from {old_len} to {new_len}). Skipping replacement.')
-                continue
+            if checks and 'sentence' in checks:
+                old_len = count_sentences(question)
+                new_len = count_sentences(new_question)
+                if new_len != old_len:
+                    logger.info(f'Sentence count check failed (changed from {old_len} to {new_len}). Skipping replacement.')
+                    continue
 
-            logger.info(f'Back-transform {new_label} -> {old_label}.')
-            _, restored_question = replace_entity(model, new_question, new_query, replace['new'], replace['old'], lang)
-            restored_question = restored_question.strip(' ,\n\t')
-            logger.info(f'Back-transformed question: {restored_question}')
+            if checks and 'levenstein' in checks:
+                logger.info(f'Back-transform {new_label} -> {old_label}.')
+                _, restored_question = replace_entity(model, new_question, new_query, replace['new'], replace['old'], lang)
+                restored_question = restored_question.strip(' ,\n\t')
+                logger.info(f'Back-transformed question: {restored_question}')
+                dist = calc_levenshtein_dist(question, restored_question)
 
-            dist = calc_levenshtein_dist(question, restored_question)
-            if checks and 'levenstein' in checks and dist > 4:
-                logger.info(f'Back-transform failed (Levenshtein distance: {dist}). Skipping replacement.')
-                continue
+                if dist > 4:
+                    logger.info(f'Back-transform failed (Levenshtein distance: {dist}). Skipping replacement.')
+                    continue
 
             logger.info(f'Successfully created new question and query by replacing {old_label} -> {new_label}.')
             logger.info(f'Original entity: {replace["old"]} ({old_label}),  PageRank: {old_pagerank}.')

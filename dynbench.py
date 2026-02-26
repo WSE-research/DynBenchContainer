@@ -3,6 +3,14 @@
 
 DEBUG = False
 
+import logging
+
+
+uvicorn_error = logging.getLogger("uvicorn.error")
+logger = logging.getLogger()
+logger.parent = uvicorn_error
+logger.setLevel(logging.DEBUG) if DEBUG else logger.setLevel(level=logging.INFO)
+
 import traceback
 
 import requests
@@ -18,8 +26,8 @@ from fastapi.responses import RedirectResponse
 
 from pymongo import MongoClient
 
-import logging
-from uvicorn.config import LOGGING_CONFIG
+# import logging
+# from uvicorn.config import LOGGING_CONFIG
 
 from decouple import config
 
@@ -36,14 +44,6 @@ from utils.wikidata import check_productivity_single
 from utils.text import count_sentences, calc_levenshtein_dist
 
 from utils.llm import call_LLM as raw_call_LLM
-
-
-logging.config.dictConfig(LOGGING_CONFIG)
-logger = logging.getLogger('uvicorn.error')
-if DEBUG:
-    logging.basicConfig(level=logging.DEBUG)
-else:
-    logging.basicConfig(level=logging.INFO)
 
 
 MONGO_HOST = config('MONGO_HOST')
@@ -243,14 +243,31 @@ def replace_entity(model: str, question: str, query: str, entity: str, new_entit
     
     new_query = query.replace(entity, new_entity)
 
-    prompt = (
-        'There is a question:',
-        question,
-        f'Replace \"{old_label}\" with \"{new_label}\" in the question.',
-        'Provide no other information.',
-        f'Languare of the question is {LANGUAGES[lang]}.',
-    )
-    prompt = '\n'.join(prompt)
+    # prompt = (
+    #     'There is a question:',
+    #     question,
+    #     f'Replace \"{old_label}\" with \"{new_label}\" in the question.',
+    #     'Provide no other information.',
+    #     f'Languare of the question is {LANGUAGES[lang]}.',
+    # )
+    # prompt = '\n'.join(prompt)
+
+    prompt = '/n'.join([
+         'Task: Translate and replace term',
+        f'- Original question: "{question}"',
+        f'- Target language: {lang}',
+        f'- Replace "{old_label}" with "{new_label}"',
+         '',
+         'Instructions:',
+         '1. Detect the source language of the original question',
+        f'2. Translate the entire question to {lang}',
+        f'3. Replace all occurrences of "{old_label}" with "{new_label}" in the translation',
+         '4. Preserve the original meaning and context',
+         '5. Return ONLY the final translated and modified sentence',
+         '',
+         'Output: Only the modified sentence, nothing else.',
+    ])
+    prompt = prompt.format(question=question, old_label=old_label, new_label=new_label, lang=LANGUAGES.get(lang, lang))
 
     logger.debug('Calling LLM to replace entity in question...')
     new_question = call_LLM(LLM_URL, KEY, model, prompt, temp=0.0, timeout=600)

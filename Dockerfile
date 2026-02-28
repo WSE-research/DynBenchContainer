@@ -24,7 +24,7 @@ COPY utils/ /app/utils/
 COPY tests/ /app/tests/
 
 # Copy the rest of the application
-COPY dynbench.py __init__.py .env /app/
+COPY dynbench.py startup.py core.py __init__.py .env /app/
 
 # Run tests and fail build if any test fails
 RUN python -m pytest tests/ --tb=short || exit 1

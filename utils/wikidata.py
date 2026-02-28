@@ -1,13 +1,13 @@
-from typing import Callable
 import logging
 
-from .sparql import uri2short
-from .text import extract_number
+logger = logging.getLogger(__name__)
 
+from typing import Callable
+
+from .sparql import uri2short
 from .sparql import sparql_results_to_list_of_dicts
 
-
-logger = logging.getLogger(__name__)
+from .text import extract_number
 
 
 FIXED_LABELS = {
@@ -60,6 +60,7 @@ WIKIDATA_PREFIX = {
 # reverse order for standard prefixes
 for k, v in list(WIKIDATA_PREFIX.items()):
     WIKIDATA_PREFIX[v] = k
+
 
 def query_wikidata_label(
         uri: str, 
@@ -129,7 +130,7 @@ def get_wikidata_label(
         return None
 
 
-def get_resources_types(info: dict, execute: Callable, predicates: list=[]) -> dict:
+def get_resources_types(info: dict, execute: Callable, predicates: list=None) -> dict:
     """
     Collect properties of entities for the item by given predicates.
 
@@ -164,6 +165,7 @@ def get_resources_types(info: dict, execute: Callable, predicates: list=[]) -> d
             raise
         except Exception as e:
             logger.error(f'Exception {e} in function get_resources_types for entity {entity}.')
+            r = {}
 
         results[entity] = r
         

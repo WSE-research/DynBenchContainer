@@ -1,13 +1,13 @@
-import re
 import logging
+
+logger = logging.getLogger(__name__)
+
+import re
 
 from nltk.tokenize import sent_tokenize
 
 
-logger = logging.getLogger(__name__)
-
-
-def extract_number(entity: str) -> int:
+def extract_number(uri: str) -> int:
     """
     Extract the number from the entity URI (e.g., 'wd:Q123' -> 123).
     
@@ -16,12 +16,14 @@ def extract_number(entity: str) -> int:
     Returns: 
         Extracted number from the entity URI
     """
-    if entity.startswith('wd:Q'):
-        try:
-            return int(re.match('.*?([0-9]+)$', entity).group(1) or 0)
-        except:
-            logger.error(f'Exception in function "extract_number", entity {entity}')
-    return 0
+    if uri is None or not isinstance(uri, str):
+        raise AttributeError('Paremeter uri must be a string.')
+
+    try:
+        return int(re.match('.*?([0-9]+)$', uri).group(1) or 0)
+    except:
+        logger.error(f'Exception in function "extract_number", entity {uri}')
+        return None
 
 
 def calc_levenshtein_dist(a: str, b: str) -> int:

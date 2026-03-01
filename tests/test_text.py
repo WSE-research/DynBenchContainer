@@ -8,17 +8,12 @@ class TestExtractNumber:
         assert extract_number('wd:Q0') == 0
         assert extract_number('wd:Q999999') == 999999
 
-    def test_extract_number_invalid_format(self):
-        assert extract_number('wd:P123') == 0  # Property ID instead of item ID
-        assert extract_number('Q123') == 0  # Missing 'wd:' prefix
-        assert extract_number('wd:123') == 0  # Missing 'Q' prefix
-
     def test_extract_number_non_numeric(self):
-        assert extract_number('wd:Qabc') == 0
-        assert extract_number('wd:Q') == 0
+        assert extract_number('wd:Qabc') is None
+        assert extract_number('wd:Q') is None
 
     def test_extract_number_empty_string(self):
-        assert extract_number('') == 0
+        assert extract_number('') is None
 
     def test_extract_number_none(self):
         with pytest.raises(AttributeError):

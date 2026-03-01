@@ -1,17 +1,17 @@
+import logging
+
+logger = logging.getLogger(__name__)
+
 import re
 import requests
+from collections import defaultdict as ddict
 
 from rdflib.plugins.sparql.parser import parseQuery
 from rdflib.term import Variable
 from rdflib import URIRef
 from pyparsing import ParseResults
 
-import logging
-
 from .timer import wait_time
-
-
-logger = logging.getLogger(__name__)
 
 
 def execute(query: str, endpoint_url: str, agent: str, delay=2.0, timeout=30.0) -> dict | None:
@@ -279,4 +279,64 @@ def extract_entities(query: str) -> list[str]:
         List of extracted entity URIs as strings
     """
     return extract_entities_recursive(parseQuery(query))
+
+
+def get_conditions_by_predicates(info: dict, predicates: list=[]) -> dict:
+    """
+    Create condition substrings for SPARQL query based on given predicates.
+    
+    Args:
+        info (dict): Information about a benchmark's record.
+        predicates (list): List of predicates to filter types.
+    """
+    conditions = ddict(dict)
+
+    logger.debug(f'Creating conditions for resources  {info["resources"]}.')
+    logger.debug(f"Resource properties: {info['types']}."    )
+    
+    for entity in info['resources']:
+        if not entity.startswith('wd:'):
+            continue
+
+        for predicate in predicates:
+            properties = info['types'][entity][predicate]
+            conditions[entity][predicate] = [f'?subst {predicate} {i}' for i in properties]
+
+    return conditions
+
+
+def get_query_conditions(info: dict) -> dict:
+    """
+    Create condition substrings for SPARQL from the query triples.
+    
+    Args:
+        info (dict): Information about a benchmark's record.
+    Returns:
+        Dictionary with query conditions for each entity.
+    """
+    query_conditions = {}
+
+    for entity in info['resources']:
+        if not entity.startswith('wd:'):
+            continue
+
+        query_conditions[entity] = []
+
+        v = 0
+        for triple in info['triples']:
+            if entity not in triple:
+                continue
+            
+            # P31 and P279 are processed separately
+            if any(i in {'wdt:P31', 'wdt:P279'} for i in triple[1].split('/')):
+                continue
+
+            if triple.index(entity) == 0:
+                query_conditions[entity].append(f'?subst {triple[1]} ?v{v}')
+            elif triple.index(entity) == 2:
+                query_conditions[entity].append(f'?v{v} {triple[1]} ?subst')
+                
+            v += 1
+
+    return query_conditions
 

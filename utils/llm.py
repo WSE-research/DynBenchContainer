@@ -1,9 +1,8 @@
-import requests
-
 import logging
 
-
 logger = logging.getLogger(__name__)
+
+import requests
 
 
 def call_LLM(url: str, key: str, model: str, prompt, temp: float=0.0, max_tokens: int=1000, timeout=30.0) -> dict | None:

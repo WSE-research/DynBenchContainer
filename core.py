@@ -6,7 +6,7 @@ from utils.sparql import get_conditions_by_predicates, get_query_conditions
 from utils.sparql import normal_sparql, parse_query, extract_entities
 
 from utils.wikidata import get_resources_types, find_substitutes
-from utils.wikidata import check_productivity_single
+from utils.wikidata import check_productivity_single, WIKIDATA_PREFIX
 
 from utils.text import count_sentences, calc_levenshtein_dist
 
@@ -205,25 +205,37 @@ def create_question_query(query: str, question: str, model: str, lang: str, comp
             - sentence: check if number of sentences is same
             - levenstein: check original question vs back-transformed by Levenstein distance.
     Returns:
-        Tuple of (new_question, new_query) or (None, None) if no valid replacement found.
+        Dictionary with keys: 'new_question', 'new_query', 'old_pagerank', 'new_pagerank', 'extra' on success.
+        Returns None if no valid replacement found.
     Raises:
         Exception: If an error occurs during processing.
     """
     logger.info(f'Transforming question: "{question}"...')
 
+    # Extra logging info to return
+    extra = {}
+    
     if checks is None:
         checks = {}
     elif isinstance(checks, (tuple, list)):
         checks = set(checks)
     elif not isinstance(checks, set):
         logger.error('Value error in create_question_query: checks must be of type tuple, list, set or None')
-        return None, None, None, None
+        return None
 
     query = normal_sparql(query, WIKIDATA_PREFIX)
     info = get_info(query)
+    
+    extra['query_info'] = {
+        'num_triples': len(info.get('triples', [])),
+        'num_resources': len(info.get('resources', [])),
+        'num_substitutes': len(info.get('substitutes', []))
+    }
 
     replaces = build_pagerank_list(info['substitutes'])
     replaces = sort_replaces_by_complexity(replaces, complexity)
+    
+    extra['total_candidates'] = len(replaces)
 
     num_tries = 0
 
@@ -232,30 +244,54 @@ def create_question_query(query: str, question: str, model: str, lang: str, comp
         # !TODO if label of item is different from used in the question then all back-transforms are failing
         #       set a max number of repeats for one entity
         if num_tries > 5:
-            return None, None, None, None
+            extra['failure_reason'] = 'max_tries_exceeded'
+            return None
 
         old_pagerank, new_pagerank, replace = replace
 
         old_label = get_label(replace['old'], lang=lang)
         logger.info(f"Label for {replace['old']}: {old_label}")
         if not old_label:
+            extra.setdefault('skipped_entities', []).append({
+                'entity': replace['old'],
+                'reason': 'no_label'
+            })
             continue
 
         new_label = get_label(replace['new'], lang=lang)
         logger.info(f"Label for {replace['new']}: {new_label}")
         if not new_label:
+            extra.setdefault('skipped_entities', []).append({
+                'entity': replace['new'],
+                'reason': 'no_label'
+            })
             continue
 
         if not check_productivity_single(query, execute, replace):
+            extra.setdefault('skipped_entities', []).append({
+                'entity': replace['old'],
+                'new_entity': replace['new'],
+                'reason': 'productivity_check_failed'
+            })
             continue
 
         new_question = None
         new_query = None
         try:
             logger.info(f'Replace {old_label} -> {new_label}.')
+            extra['llm_calls'] = extra.get('llm_calls', [])
+            extra['llm_calls'].append({
+                'type': 'forward',
+                'old_entity': replace['old'],
+                'new_entity': replace['new'],
+                'old_label': old_label,
+                'new_label': new_label
+            })
             new_query, new_question = replace_entity(model, question, query, replace['old'], replace['new'], lang)
             if not new_question or not new_query:
                 logger.info(f'Cannot generate forward transformation.')
+                extra['llm_calls'][-1]['success'] = False
+                extra['llm_calls'][-1]['failure_reason'] = 'forward_transformation_failed'
                 continue
 
             new_question = new_question.strip(' ,\n\t')
@@ -271,24 +307,57 @@ def create_question_query(query: str, question: str, model: str, lang: str, comp
 
             if checks and 'levenstein' in checks:
                 logger.info(f'Back-transform {new_label} -> {old_label}.')
+                extra['llm_calls'] = extra.get('llm_calls', [])
+                extra['llm_calls'].append({
+                    'type': 'backward',
+                    'old_entity': replace['new'],
+                    'new_entity': replace['old'],
+                    'old_label': new_label,
+                    'new_label': old_label
+                })
                 _, restored_question = replace_entity(model, new_question, new_query, replace['new'], replace['old'], lang)
                 restored_question = restored_question.strip(' ,\n\t')
                 logger.info(f'Back-transformed question: {restored_question}')
                 dist = calc_levenshtein_dist(question, restored_question)
+                extra['llm_calls'][-1]['success'] = restored_question is not None
+                extra['llm_calls'][-1]['levenshtein_distance'] = dist
 
                 if dist > 4:
                     logger.info(f'Back-transform failed (Levenshtein distance: {dist}). Skipping replacement.')
+                    extra['llm_calls'][-1]['failure_reason'] = 'back_transform_failed'
                     continue
 
             logger.info(f'Successfully created new question and query by replacing {old_label} -> {new_label}.')
             logger.info(f'Original entity: {replace["old"]} ({old_label}),  PageRank: {old_pagerank}.')
             logger.info(f'New entity: {replace["new"]} ({new_label}), PageRank: {new_pagerank}.')
+            
+            extra['success'] = True
+            extra['selected_replace'] = {
+                'old_entity': replace['old'],
+                'new_entity': replace['new'],
+                'old_label': old_label,
+                'new_label': new_label,
+                'old_pagerank': old_pagerank,
+                'new_pagerank': new_pagerank
+            }
 
-            return new_question, new_query, old_pagerank, new_pagerank
+            return {
+                'transformed_question': new_question,
+                'transformed_query': new_query,
+                'old_pagerank': old_pagerank,
+                'new_pagerank': new_pagerank,
+                'extra': extra
+            }
         except KeyboardInterrupt:
             raise
         except Exception as e:
             logger.error(f'Exception in create_question_query: {e}.')
+            extra.setdefault('exceptions', []).append({
+                'entity': replace['old'],
+                'new_entity': replace['new'],
+                'error': str(e)
+            })
             continue
         
-    return None, None, None, None
+    extra['failure_reason'] = 'no_valid_replacement_found'
+    return None

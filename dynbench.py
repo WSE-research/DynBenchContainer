@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import logging
+import json
 
 DEBUG = False
 
@@ -57,14 +58,18 @@ def main():
     lang = args.lang
     model = args.model
 
-    new_question, new_query, old_pagerank, new_pagerank = create_question_query(query, question, model, lang, complexity, None)
+    result = create_question_query(query, question, model, lang, complexity, None)
+
+    if result is None:
+        logger.error('Failed to create transformed question and query')
+        return
 
     logger.info(f'Original Question: {question}')
     logger.info(f'Original Query: {query}')
-    logger.info(f'Transformed Question: {new_question}')
-    logger.info(f'Transformed Query: {new_query}')
-    logger.info(f'Old PageRank: {old_pagerank}')
-    logger.info(f'New PageRank: {new_pagerank}')
+    logger.info(f'Transformed Question: {result["transformed_question"]}')
+    logger.info(f'Transformed Query: {result["transformed_query"]}')
+    logger.info(f'Old PageRank: {result["old_pagerank"]}')
+    logger.info(f'New PageRank: {result["new_pagerank"]}')
 
 
 app = FastAPI()
@@ -168,6 +173,8 @@ def transform_endpoint(request: TransformRequest) -> TransformResponse:
     Args:
         request (TransformRequest): The request body containing question, query, model, lang, and complexity.
     """
+    extra = {}
+    
     if request.lang not in LANGUAGES:
         raise HTTPException(
             status_code=400, 
@@ -187,7 +194,7 @@ def transform_endpoint(request: TransformRequest) -> TransformResponse:
         )
             
     try:
-        new_question, new_query, old_pagerank, new_pagerank = create_question_query(
+        result = create_question_query(
             request.query,
             request.question,
             request.model,
@@ -196,13 +203,29 @@ def transform_endpoint(request: TransformRequest) -> TransformResponse:
             request.checks
         )
         
+        if result is None:
+            extra["error"] = "Failed to create transformed question and query"
+            return TransformResponse(
+                original_question=request.question,
+                original_query=request.query,
+                transformed_question=None,
+                transformed_query=None,
+                old_pagerank=None,
+                new_pagerank=None,
+                extra=extra
+            )
+        
+        logger.info(json.dumps(result, indent=2))
+
         return TransformResponse(
             original_question=request.question,
             original_query=request.query,
-            transformed_question=new_question,
-            transformed_query=new_query,
-            old_pagerank=old_pagerank,
-            new_pagerank=new_pagerank
+            **result,
+            # transformed_question=result["new_question"],
+            # transformed_query=result["new_query"],
+            # old_pagerank=result["old_pagerank"],
+            # new_pagerank=result["new_pagerank"],
+            # extra=result["extra"]
         )
     
     except Exception as e:
@@ -248,7 +271,7 @@ def health_check():
 
 if DEBUG:
     query = 'SELECT ?answer WHERE { wd:Q14452 wdt:P17 ?answer }'
-    create_question_query(
+    result = create_question_query(
         query,
         'Which country does the famous Easter island belong to?',
         'Gemma3:27b',
@@ -256,6 +279,14 @@ if DEBUG:
         'normal',
         None
     )
+    if result is not None:
+        logger.info(f'Extra info: {result["extra"]}')
+        logger.info(f'Transformed Question: {result["transformed_question"]}')
+        logger.info(f'Transformed Query: {result["transformed_query"]}')
+        logger.info(f'Old PageRank: {result["old_pagerank"]}')
+        logger.info(f'New PageRank: {result["new_pagerank"]}')
+    else:
+        logger.error('Failed to create transformed question and query')
 else:
     if __name__ == "__main__":
         main()

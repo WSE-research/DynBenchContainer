@@ -65,7 +65,7 @@ def execute(query: str, delay=2.0, timeout=30.0,) -> dict | None:
     return raw_execute(query, WIKIDATA_ENDPOINT, WIKIDATA_AGENT, delay=delay, timeout=timeout)
 
 
-@cache.cache(using={'model', 'prompt', 'temp', 'max_tokens'})
+@cache.cache(using={'url', 'model', 'prompt', 'temp', 'max_tokens'})
 def call_LLM(url: str, key: str, model: str, prompt, temp: float=0.0, max_tokens: int=1000, timeout=30.0) -> dict | None:
     return raw_call_LLM(url, key, model, prompt, temp, max_tokens, timeout)
         

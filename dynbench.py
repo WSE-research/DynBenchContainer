@@ -175,7 +175,7 @@ def transform_endpoint(request: TransformRequest) -> TransformResponse:
                 extra=extra
             )
         
-        logger.info(json.dumps(result, indent=2))
+        # logger.info(json.dumps(result, indent=2))
 
         return TransformResponse(
             original_question=request.question,

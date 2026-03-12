@@ -39,7 +39,7 @@ def detect_language(text: str, model: str) -> str | None:
         temp=0.0,
         max_tokens=10
     )
-    
+
     if result is None:
         logger.error('Failed to detect language')
         return None
@@ -47,9 +47,12 @@ def detect_language(text: str, model: str) -> str | None:
     # Extract language code from response
     try:
         lang_code = result['response']
-    except json.JSONDecodeError:
+    except:
         # If not JSON, try to extract language code directly
-        lang_code = result.strip()
+        try:
+            lang_code = result.strip()
+        except:
+            return None
 
     # Validate it's a 2(3)-letter language code
     if 1 < len(lang_code) < 4 and lang_code.isalpha():

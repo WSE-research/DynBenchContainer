@@ -3,6 +3,7 @@
 
 import logging
 import json
+import requests
 
 DEBUG = False
 
@@ -125,7 +126,24 @@ transform_lock = threading.Lock()
 #         raise HTTPException(status_code=500, detail="Failed to detect language")
     
 #     return DetectLanguageResponse(detected_language=lang_code)
-
+def get_models_list(url):
+    """Fetch available models from the API endpoint."""
+    try:
+        response = requests.get(url + '/v1/models', timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        if 'data' in data and isinstance(data['data'], list):
+            return [model['id'] for model in data['data'] if 'id' in model]
+        else:
+            logger.error("Unexpected response format from models endpoint")
+            return []
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Failed to fetch models: {e}")
+        return []
+    except ValueError as e:
+        logger.error(f"Failed to parse JSON response: {e}")
+        return []
+    
 
 @app.post("/transform", response_model=TransformResponse)
 def transform_endpoint(request: TransformRequest) -> TransformResponse:
@@ -227,6 +245,20 @@ def read_root():
 def health_check():
     """Check the health of the API."""
     return {"status": "healthy"}
+
+
+@app.get("/models")
+def models_endpoint():
+    """Get the list of available models from the LLM API."""
+    models = get_models_list(f'{LLM_URL}/v1/models')
+    
+    if not models:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to fetch models from the LLM API"
+        )
+    
+    return {"models": models}
 
 
 if DEBUG:

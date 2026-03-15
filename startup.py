@@ -24,6 +24,8 @@ MONGO_USER = config('MONGO_USER')
 MONGO_PASS = config('MONGO_PASS')
 
 LLM_URL = config('LLM_URL')
+BASE_URL = LLM_URL.replace('/api/generate', '').replace('/v1/chat/completions', '')
+LLM_MODELS = f'{BASE_URL}/v1/models'
 
 WIKIDATA_AGENT = config('WIKIDATA_AGENT')
 WIKIDATA_ENDPOINT = config('WIKIDATA_ENDPOINT')
@@ -34,7 +36,7 @@ logger.info(f'Mongo host: {MONGO_HOST}')
 logger.info(f'Mongo user: {MONGO_USER}')
 logger.info(f'Wikidata endpoint: {WIKIDATA_ENDPOINT}')
 logger.info(f'Wikidata agent: {WIKIDATA_AGENT}')
-logger.info(f'LLM URL: {LLM_URL}')
+logger.info(f'LLM URL: {BASE_URL}')
 
 mongo = MongoClient(
     MONGO_HOST,
@@ -78,8 +80,7 @@ logger.info(f'Cache contains {cache_collection.count_documents({})} records.')
 
 
 try:
-    health_check_url = LLM_URL.replace('/api/generate', '').replace('/v1/chat/completions', '')
-    r = requests.get(health_check_url)
+    r = requests.get(BASE_URL)
     logger.info(f'LLM status (http code): {r.status_code}')
 except:
     logger.error('Error connecting LLM, exiting...')

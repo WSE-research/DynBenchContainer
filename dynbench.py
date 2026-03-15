@@ -25,7 +25,7 @@ from startup import LANGUAGES
 from core import create_question_query # , detect_language
 from core import feedback_collection
 
-from startup import call_LLM, LLM_URL, KEY
+from startup import BASE_URL
 
 
 app = FastAPI()
@@ -250,7 +250,7 @@ def health_check():
 @app.get("/models")
 def models_endpoint():
     """Get the list of available models from the LLM API."""
-    models = get_models_list(f'{LLM_URL}/v1/models')
+    models = get_models_list(BASE_URL)
     
     if not models:
         raise HTTPException(

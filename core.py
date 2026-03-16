@@ -278,7 +278,7 @@ def create_question_query(query: str, question: str, model: str, lang: str, comp
     extra = {}
 
     old_language = detect_language(question, model)
-    extra['Original language'] = old_language
+    extra['detected_language'] = old_language
     
     if checks is None:
         checks = {}

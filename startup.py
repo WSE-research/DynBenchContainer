@@ -35,6 +35,7 @@ WIKIDATA_AGENT = config('WIKIDATA_AGENT')
 WIKIDATA_ENDPOINT = config('WIKIDATA_ENDPOINT')
 
 KEY = config('KEY')
+ALLOWED_MODELS = config('ALLOWED_MODELS').split(',')
 # MODEL=config('MODEL')
 
 logger.info(f'Mongo host: {MONGO_HOST}')
@@ -77,9 +78,15 @@ def execute(query: str, delay=2.0, timeout=30.0,) -> dict | None:
 # def call_LLM(url: str, key: str, model: str, prompt, temp: float=0.0, max_tokens: int=1000, timeout=30.0) -> dict | None:
 #     return raw_call_LLM(url, key, model, prompt, temp, max_tokens, timeout)
         
-client = OpenAI(api_key=KEY)
-if not client:
-    logger.error('Error connecting LLM, exiting...')
+try: 
+    client = OpenAI(base_url=BASE_URL, api_key=KEY)
+    models_list = list(client.models.list())
+    models_list = [dict(i) for i in models_list]
+    models_list = sorted([i['id'] for i in models_list if i['id'] in ALLOWED_MODELS])
+    # print('\n'.join(models_list))
+except Exception as e:
+    logger.error('Error connecting to LLM, exiting...')
+    logger.error(str(e))
     exit(1)
 
 

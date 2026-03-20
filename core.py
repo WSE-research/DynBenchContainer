@@ -35,7 +35,6 @@ def detect_language(text: str, model: str) -> str | None:
         model=model,
         prompt=prompt,
     )
-    # print("detect language:", result)
 
     if result is None:
         logger.error('Failed to detect language')

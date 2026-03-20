@@ -20,10 +20,10 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from fastapi.responses import RedirectResponse
 
-from startup import LANGUAGES
+from startup import feedback_collection, models_list, LANGUAGES
 
 from core import create_question_query # , detect_language
-from core import feedback_collection
+# from core import feedback_collection
 
 # from startup import BASE_URL
 
@@ -126,23 +126,25 @@ transform_lock = threading.Lock()
 #         raise HTTPException(status_code=500, detail="Failed to detect language")
     
 #     return DetectLanguageResponse(detected_language=lang_code)
-def get_models_list(url):
-    """Fetch available models from the API endpoint."""
-    try:
-        response = requests.get(url + '/v1/models', timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        if 'data' in data and isinstance(data['data'], list):
-            return [model['id'] for model in data['data'] if 'id' in model]
-        else:
-            logger.error("Unexpected response format from models endpoint")
-            return []
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Failed to fetch models: {e}")
-        return []
-    except ValueError as e:
-        logger.error(f"Failed to parse JSON response: {e}")
-        return []
+
+
+# def get_models_list(url):
+#     """Fetch available models from the API endpoint."""
+#     try:
+#         response = requests.get(url + '/v1/models', timeout=30)
+#         response.raise_for_status()
+#         data = response.json()
+#         if 'data' in data and isinstance(data['data'], list):
+#             return [model['id'] for model in data['data'] if 'id' in model]
+#         else:
+#             logger.error("Unexpected response format from models endpoint")
+#             return []
+#     except requests.exceptions.RequestException as e:
+#         logger.error(f"Failed to fetch models: {e}")
+#         return []
+#     except ValueError as e:
+#         logger.error(f"Failed to parse JSON response: {e}")
+#         return []
     
 
 @app.post("/transform", response_model=TransformResponse)
@@ -225,7 +227,8 @@ async def submit_feedback(feedback: FeedbackRequest):
             "rating": feedback.rating,
         }
 
-        result = await feedback_collection.insert_one(feedback_doc)
+#        result = await feedback_collection.insert_one(feedback_doc)
+        result = feedback_collection.insert_one(feedback_doc)
 
         return {
             "message": "Feedback stored successfully",
@@ -248,18 +251,10 @@ def health_check():
     return {"status": "healthy"}
 
 
-# @app.get("/models")
-# def models_endpoint():
-#     """Get the list of available models from the LLM API."""
-#     models = get_models_list(BASE_URL)
-    
-#     if not models:
-#         raise HTTPException(
-#             status_code=500,
-#             detail="Failed to fetch models from the LLM API"
-#         )
-    
-#     return {"models": models}
+@app.get("/v1/models")
+def models_endpoint():
+    """Get the list of available models from the LLM API."""
+    return {"models": models_list}
 
 
 if DEBUG:

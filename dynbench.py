@@ -167,6 +167,12 @@ def transform_endpoint(request: TransformRequest) -> TransformResponse:
             detail=f"Invalid complexity: {request.complexity} (supported: easy, normal, hard, random)"
         )
     
+    if request.model not in models_list:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Model {request.model} is not accessible."
+        )
+    
     if not transform_lock.acquire(blocking=False):
         raise HTTPException(
             status_code=503,

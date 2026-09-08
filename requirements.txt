@@ -1,11 +1,11 @@
-fastapi==0.139.2
-nltk==3.10.0
-pydantic==2.13.4
-pymongo==4.17.0
+fastapi==0.141.1
+nltk==3.10.3
+pydantic==2.13.5
+pymongo==4.18.0
 pyparsing==3.3.2
 python-decouple==3.8
 rdflib==7.6.0
 Requests==2.34.2
-uvicorn==0.51.0
+uvicorn==0.52.4
 pytest==9.1.1
 openai==2.46.0
